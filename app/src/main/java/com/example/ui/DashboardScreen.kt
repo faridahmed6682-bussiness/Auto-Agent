@@ -69,6 +69,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     val executionMode by viewModel.executionMode.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val playbooks by viewModel.playbooks.collectAsStateWithLifecycle()
+    val cachedActions by viewModel.cachedActions.collectAsStateWithLifecycle()
 
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
 
@@ -220,6 +221,14 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                     PlaybookLibraryCard(
                         playbooks = playbooks,
                         onDeletePlaybook = viewModel::deletePlaybook
+                    )
+                }
+
+                item {
+                    ActionCacheLibraryCard(
+                        cachedActions = cachedActions,
+                        onDeleteEntry = viewModel::deleteCachedAction,
+                        onClearAll = viewModel::clearActionCache
                     )
                 }
 

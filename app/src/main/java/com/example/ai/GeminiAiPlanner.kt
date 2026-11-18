@@ -34,7 +34,7 @@ class GeminiAiPlanner {
         Your job is to research/understand unfamiliar games or apps, execute the optimal next gesture, and continuously learn from the visual outcome of every previous action!
 
         Gesture Rules:
-        1. TAP: Use targetNodeId + (x, y) center for standard UI buttons, or visual (x, y) on game canvases/boards where no UI node exists.
+        1. TAP: Use targetNodeId + (x, y) center for standard UI buttons, or visual (x, y) on game canvases/boards where no UI node exists. If the screenshot includes cyan X/Y pixel grid labels (e.g. x216, y600), read coordinates directly from those grid lines for sub-pixel precision.
         2. DRAG: Use (x, y) as start point and (endX, endY) as release point with optional durationMs (e.g. 250..1200ms).
            - For slider controls: drag slider knob horizontally/vertically to position striker or value.
            - For slingshot / Carrom / Pool / Golf aiming: start (x, y) at the striker/ball and drag OPPOSITE to the desired shot direction to (endX, endY) to aim and set power, then release.
@@ -292,34 +292,56 @@ class GeminiAiPlanner {
                 snapshot.screenshot
             }
 
-            val attempt = withTimeout(INFERENCE_TIMEOUT_MS * 2) {
-                ApiKeyFailoverManager.executeWithFailover(
-                    settings = settings,
-                    firebaseConfigured = isFirebaseConfigured(),
-                    taskProfile = taskProfile
-                ) { provider, apiKey, model ->
-                    val raw = if (provider == AiProvider.FIREBASE_AI) {
-                        firebaseModel.generateContent(
-                            content {
-                                effectiveScreenshot?.let { bitmap ->
-                                    image(bitmap)
+            val annotatedCopy = if (
+                effectiveScreenshot != null &&
+                settings.useCoordinateGridOverlay &&
+                taskProfile == AiTaskProfile.HIGH_ACCURACY
+            ) {
+                VisualGridAnnotator.createAnnotatedCopy(
+                    source = effectiveScreenshot,
+                    screenWidth = snapshot.screenWidth,
+                    screenHeight = snapshot.screenHeight
+                )
+            } else {
+                null
+            }
+            val aiScreenshot = annotatedCopy ?: effectiveScreenshot
+
+            val attempt = try {
+                withTimeout(INFERENCE_TIMEOUT_MS * 2) {
+                    ApiKeyFailoverManager.executeWithHedgeOrFailover(
+                        settings = settings,
+                        firebaseConfigured = isFirebaseConfigured(),
+                        taskProfile = taskProfile,
+                        enableHedgeRace = settings.turboDualKeyGameMode && taskProfile == AiTaskProfile.HIGH_ACCURACY
+                    ) { provider, apiKey, model ->
+                        val raw = if (provider == AiProvider.FIREBASE_AI) {
+                            firebaseModel.generateContent(
+                                content {
+                                    aiScreenshot?.let { bitmap ->
+                                        image(bitmap)
+                                    }
+                                    text(promptText)
                                 }
-                                text(promptText)
-                            }
-                        ).text.orEmpty()
-                    } else {
-                        RestAiClients.callProvider(
-                            provider = provider,
-                            apiKey = apiKey,
-                            modelName = model,
-                            systemInstruction = systemPromptText,
-                            promptText = promptText,
-                            screenshot = effectiveScreenshot,
-                            schemaKind = RestSchemaKind.ACTION
-                        )
+                            ).text.orEmpty()
+                        } else {
+                            RestAiClients.callProvider(
+                                provider = provider,
+                                apiKey = apiKey,
+                                modelName = model,
+                                systemInstruction = systemPromptText,
+                                promptText = promptText,
+                                screenshot = aiScreenshot,
+                                schemaKind = RestSchemaKind.ACTION
+                            )
+                        }
+                        if (raw.isBlank()) throw IllegalStateException("${provider.displayName} returned empty action response.")
+                        parsePlannedAction(raw)
                     }
-                    if (raw.isBlank()) throw IllegalStateException("${provider.displayName} returned empty action response.")
-                    parsePlannedAction(raw)
+                }
+            } finally {
+                if (annotatedCopy != null && annotatedCopy !== effectiveScreenshot) {
+                    annotatedCopy.recycle()
                 }
             }
 

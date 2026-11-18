@@ -43,6 +43,14 @@
     <string name="settings_routing_sticky_desc">Stays on your selected primary provider and key until an error occurs, then fails over.</string>
     <string name="settings_smart_fast_path_label">UI-Tree Fast Path (Saves Quota)</string>
     <string name="settings_smart_fast_path_desc">Sends fast text-only UI tree on standard screens (~0.4s) and reserves screenshots for games, Step 1, or error recovery.</string>
+    <string name="settings_turbo_hedge_label">Turbo Dual-Key Game Mode (450ms Hedge)</string>
+    <string name="settings_turbo_hedge_desc">For Carrom &amp; games: starts 2nd key/provider in parallel if 1st key exceeds 450ms; first valid shot wins instantly.</string>
+    <string name="settings_zero_api_cache_label">Zero-API Successful Action Cache</string>
+    <string name="settings_zero_api_cache_desc">Remembers verified app launches, menus &amp; taps locally and replays them with 0 API calls.</string>
+    <string name="settings_carrom_solver_label">On-Device Carrom Physics Solver (0 API)</string>
+    <string name="settings_carrom_solver_desc">Computes Ghost-Ball cut angles, blocked-path checks, foul guards, and rolling-coin waits locally with 0 API calls.</string>
+    <string name="settings_coordinate_grid_label">AI Coordinate Grid Vision</string>
+    <string name="settings_coordinate_grid_desc">Draws subtle X/Y pixel reference lines on game screenshots so AI reads exact coordinates.</string>
     <string name="settings_bulk_upload_file">Bulk Upload (.txt/.csv/.json)</string>
     <string name="settings_bulk_auto_sort">Auto-Sort Mixed Keys</string>
     <string name="settings_reset_key_health">Reset Key Health</string>
@@ -61,6 +69,10 @@
     <string name="settings_delay_label">Step Delay (ms)</string>
     <string name="playbook_section_title">Trained Playbooks &amp; Memory</string>
     <string name="playbook_empty_hint">Unfamiliar games or tasks are automatically researched first, then refined from every shot &amp; foul outcome.</string>
+    <string name="action_cache_section_title">Zero-API Action Cache</string>
+    <string name="action_cache_empty_hint">Verified app launches, lobby buttons, and UI navigation steps are saved automatically here and replayed next time with 0 AI calls.</string>
+    <string name="action_clear_cache">Clear Cache</string>
+    <string name="cd_delete_cached_action">Delete cached action</string>
     <string name="monitor_channel_name">TapPilot Background Monitor</string>
     <string name="monitor_channel_desc">Keeps all-day AI screen &amp; notification monitoring active with an instant Stop button.</string>
     <string name="cd_settings">Open agent settings</string>

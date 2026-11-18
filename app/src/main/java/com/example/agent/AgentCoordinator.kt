@@ -4,6 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.example.ai.ApiKeyFailoverManager
 import com.example.ai.GeminiAiPlanner
+import com.example.game.CarromVisionDetector
+import com.example.game.CarromVisionOutcome
+import com.example.game.CoinColor
 import com.example.service.AgentKeepAliveService
 import com.example.service.TapPilotAccessibilityService
 import kotlinx.coroutines.CancellationException
@@ -32,8 +35,10 @@ object AgentCoordinator {
     private var appContext: Context? = null
     private var settingsStore: AgentSettingsStore? = null
     private var knowledgeStore: AgentKnowledgeStore? = null
+    private var actionCacheStore: ActionCacheStore? = null
     private var settingsCollectJob: Job? = null
     private var playbooksCollectJob: Job? = null
+    private var cacheCollectJob: Job? = null
     private val aiPlanner = GeminiAiPlanner()
 
     private var serviceRef: WeakReference<TapPilotAccessibilityService>? = null
@@ -52,6 +57,9 @@ object AgentCoordinator {
 
     private val _playbooks = MutableStateFlow<List<TaskPlaybook>>(emptyList())
     val playbooks: StateFlow<List<TaskPlaybook>> = _playbooks.asStateFlow()
+
+    private val _cachedActions = MutableStateFlow<List<CachedActionEntry>>(emptyList())
+    val cachedActions: StateFlow<List<CachedActionEntry>> = _cachedActions.asStateFlow()
 
     private val _uiState = MutableStateFlow<AgentUiState>(AgentUiState.Idle)
     val uiState: StateFlow<AgentUiState> = _uiState.asStateFlow()
@@ -74,8 +82,16 @@ object AgentCoordinator {
                 _playbooks.value = list
             }
         }
+        val cStore = ActionCacheStore(app)
+        actionCacheStore = cStore
+        cacheCollectJob = scope.launch {
+            cStore.cachedActions.collect { list ->
+                _cachedActions.value = list
+            }
+        }
         scope.launch {
             kStore.loadInitial()
+            cStore.loadInitial()
         }
     }
 
@@ -115,6 +131,20 @@ object AgentCoordinator {
         val store = knowledgeStore ?: return
         scope.launch {
             store.deletePlaybook(topicKey)
+        }
+    }
+
+    fun deleteCachedAction(cacheKey: String) {
+        val store = actionCacheStore ?: return
+        scope.launch {
+            store.removeEntry(cacheKey)
+        }
+    }
+
+    fun clearActionCache() {
+        val store = actionCacheStore ?: return
+        scope.launch {
+            store.clearAll()
         }
     }
 
@@ -238,6 +268,11 @@ object AgentCoordinator {
                 }
 
                 var step = 1
+                var pendingCacheCandidate: PendingCacheCandidate? = null
+                var lastReplayEntry: Pair<String, String>? = null
+                var carromOfflineWaits = 0
+                CarromVisionDetector.resetMotionHistory()
+
                 while (maxStepsLimit == null || step <= maxStepsLimit) {
                     val currentSettings = _settings.value
                     awaitIfPaused(goal, mode, step, maxStepsLimit, workingMemory, trace)
@@ -274,78 +309,202 @@ object AgentCoordinator {
                         recentNotifications.toList()
                     }
 
-                    val plannedAction: PlannedAction = try {
-                        _uiState.value = AgentUiState.Running(
-                            goal = goal,
-                            mode = mode,
-                            currentStep = step,
-                            maxSteps = maxStepsLimit,
-                            phase = AgentPhase.THINKING,
-                            lastThought = snapshot.captureNote,
-                            workingMemory = workingMemory,
-                            trace = trace.toList()
-                        )
+                    val currentSig = ActionCacheStore.computeScreenSignature(snapshot.nodes)
+                    val currentCompositeScreen = "${snapshot.packageName}::$currentSig"
+                    var justEvictedStaleCache = false
 
-                        val planResult = withContext(Dispatchers.IO) {
-                            aiPlanner.planNextAction(
-                                goal = goal,
-                                mode = mode,
-                                settings = currentSettings,
-                                snapshot = snapshot,
-                                recentHistory = trace,
-                                recentNotifications = notificationsSnapshot,
-                                workingMemory = workingMemory,
-                                playbook = activePlaybook,
-                                lastOutcomeHint = lastOutcomeHint,
-                                stepNumber = step,
-                                maxSteps = maxStepsLimit
-                            )
+                    val prevReplay = lastReplayEntry
+                    if (prevReplay != null) {
+                        if (prevReplay.second == currentCompositeScreen) {
+                            // Cached tap did not advance the screen — evict stale entry and use live AI
+                            actionCacheStore?.removeEntry(prevReplay.first)
+                            justEvictedStaleCache = true
+                        } else {
+                            actionCacheStore?.incrementHit(prevReplay.first)
                         }
+                        lastReplayEntry = null
+                    } else {
+                        val prevCandidate = pendingCacheCandidate
+                        if (prevCandidate != null) {
+                            actionCacheStore?.recordVerifiedSuccess(prevCandidate, snapshot)
+                            pendingCacheCandidate = null
+                        }
+                    }
 
-                        planResult.getOrElse { err ->
-                            val msg = err.localizedMessage ?: "AI planning failed."
-                            val isConfigOrAuthError = msg.contains("Firebase is not", ignoreCase = true) ||
-                                msg.contains("Missing API key", ignoreCase = true) ||
-                                msg.contains("HTTP 401") ||
-                                msg.contains("HTTP 403")
-                            if (mode == AgentExecutionMode.CONTINUOUS_MONITOR && !isConfigOrAuthError) {
-                                // Recoverable network/transient hiccup in all-day monitor: wait and retry
-                                appendTrace(
-                                    trace,
-                                    AgentStepLog(
-                                        stepNumber = step,
-                                        timestampMs = System.currentTimeMillis(),
+                    val cacheMatch = if (currentSettings.useZeroApiActionCache && !justEvictedStaleCache) {
+                        actionCacheStore?.findReplayMatch(goal, snapshot)
+                    } else {
+                        null
+                    }
+
+                    val interactiveNodeCount = snapshot.nodes.count { it.isClickable || it.isEditable }
+                    val isCarromContext = goal.contains("carrom", ignoreCase = true) ||
+                        snapshot.packageName.contains("carrom", ignoreCase = true) ||
+                        (activePlaybook?.topicKey?.contains("carrom", ignoreCase = true) == true)
+                    var usedLocalCarromSolver = false
+
+                    val plannedAction: PlannedAction = if (cacheMatch != null) {
+                        carromOfflineWaits = 0
+                        snapshot.screenshot?.recycle()
+                        lastReplayEntry = cacheMatch.entry.cacheKey to currentCompositeScreen
+                        cacheMatch.action
+                    } else {
+                        val localCarromAction: PlannedAction? = if (
+                            currentSettings.carromPrecisionSolver &&
+                            isCarromContext &&
+                            interactiveNodeCount < 5 &&
+                            snapshot.screenshot != null
+                        ) {
+                            val myCoinColor = if (workingMemory.contains("black", ignoreCase = true)) {
+                                CoinColor.BLACK
+                            } else {
+                                CoinColor.WHITE
+                            }
+                            when (val outcome = CarromVisionDetector.analyzeAndSolve(
+                                screenshot = snapshot.screenshot,
+                                screenWidth = snapshot.screenWidth,
+                                screenHeight = snapshot.screenHeight,
+                                myCoinColor = myCoinColor,
+                                consecutiveOfflineWaits = carromOfflineWaits
+                            )) {
+                                is CarromVisionOutcome.WaitStillnessOrTurn -> {
+                                    carromOfflineWaits++
+                                    PlannedAction(
                                         actionType = AgentActionType.WAIT,
-                                        targetSummary = "Transient AI error",
-                                        reason = msg,
-                                        status = StepStatus.WAITING,
+                                        targetNodeId = null,
+                                        x = null,
+                                        y = null,
+                                        textToType = null,
+                                        waitSeconds = 2,
+                                        memoryNote = null,
+                                        reason = outcome.reason,
                                         requiresConfirmation = false
                                     )
-                                )
-                                sleepMonitorInterval(
+                                }
+                                is CarromVisionOutcome.SolvedShot -> {
+                                    carromOfflineWaits = 0
+                                    usedLocalCarromSolver = true
+                                    val sol = outcome.solution
+                                    val striker = outcome.detectedStriker
+                                    if (striker != null && kotlin.math.abs(sol.strikerPos.x - striker.center.x) > 28f) {
+                                        PlannedAction(
+                                            actionType = AgentActionType.DRAG,
+                                            targetNodeId = null,
+                                            x = striker.center.x.toInt(),
+                                            y = striker.center.y.toInt(),
+                                            endX = sol.strikerPos.x.toInt(),
+                                            endY = outcome.board.baselineY.toInt(),
+                                            durationMs = 260L,
+                                            textToType = null,
+                                            waitSeconds = null,
+                                            memoryNote = "Carrom Solver (${myCoinColor.name}): positioning striker for ${sol.reason}",
+                                            reason = "Zero-API Carrom Solver: position striker on baseline for ${sol.reason}",
+                                            requiresConfirmation = false
+                                        )
+                                    } else {
+                                        PlannedAction(
+                                            actionType = AgentActionType.DRAG,
+                                            targetNodeId = null,
+                                            x = sol.strikerPos.x.toInt(),
+                                            y = sol.strikerPos.y.toInt(),
+                                            endX = sol.dragEnd.x.toInt(),
+                                            endY = sol.dragEnd.y.toInt(),
+                                            durationMs = 480L,
+                                            textToType = null,
+                                            waitSeconds = null,
+                                            memoryNote = "Carrom Solver (${myCoinColor.name}): ${sol.reason}",
+                                            reason = "Zero-API Carrom Solver: ${sol.reason} (conf=${(sol.confidenceScore * 100).toInt()}%)",
+                                            requiresConfirmation = false
+                                        )
+                                    }
+                                }
+                                is CarromVisionOutcome.NeedsAiVision -> {
+                                    carromOfflineWaits = 0
+                                    null
+                                }
+                            }
+                        } else {
+                            null
+                        }
+
+                        if (localCarromAction != null) {
+                            snapshot.screenshot?.recycle()
+                            localCarromAction
+                        } else {
+                            try {
+                                _uiState.value = AgentUiState.Running(
                                     goal = goal,
                                     mode = mode,
-                                    step = step,
+                                    currentStep = step,
                                     maxSteps = maxStepsLimit,
-                                    waitSec = currentSettings.monitorIntervalSec,
-                                    reason = "Retrying after transient error: ${err.localizedMessage ?: "network"}",
-                                    workingMemory = workingMemory,
-                                    trace = trace
-                                )
-                                step++
-                                continue
-                            } else {
-                                _uiState.value = AgentUiState.Error(
-                                    goal = goal,
-                                    message = err.localizedMessage ?: "Gemini planning failed.",
+                                    phase = AgentPhase.THINKING,
+                                    lastThought = snapshot.captureNote,
                                     workingMemory = workingMemory,
                                     trace = trace.toList()
                                 )
-                                return@launch
+
+                                val planResult = withContext(Dispatchers.IO) {
+                                    aiPlanner.planNextAction(
+                                        goal = goal,
+                                        mode = mode,
+                                        settings = currentSettings,
+                                        snapshot = snapshot,
+                                        recentHistory = trace,
+                                        recentNotifications = notificationsSnapshot,
+                                        workingMemory = workingMemory,
+                                        playbook = activePlaybook,
+                                        lastOutcomeHint = lastOutcomeHint,
+                                        stepNumber = step,
+                                        maxSteps = maxStepsLimit
+                                    )
+                                }
+
+                                planResult.getOrElse { err ->
+                                    val msg = err.localizedMessage ?: "AI planning failed."
+                                    val isConfigOrAuthError = msg.contains("Firebase is not", ignoreCase = true) ||
+                                        msg.contains("Missing API key", ignoreCase = true) ||
+                                        msg.contains("HTTP 401") ||
+                                        msg.contains("HTTP 403")
+                                    if (mode == AgentExecutionMode.CONTINUOUS_MONITOR && !isConfigOrAuthError) {
+                                        // Recoverable network/transient hiccup in all-day monitor: wait and retry
+                                        appendTrace(
+                                            trace,
+                                            AgentStepLog(
+                                                stepNumber = step,
+                                                timestampMs = System.currentTimeMillis(),
+                                                actionType = AgentActionType.WAIT,
+                                                targetSummary = "Transient AI error",
+                                                reason = msg,
+                                                status = StepStatus.WAITING,
+                                                requiresConfirmation = false
+                                            )
+                                        )
+                                        sleepMonitorInterval(
+                                            goal = goal,
+                                            mode = mode,
+                                            step = step,
+                                            maxSteps = maxStepsLimit,
+                                            waitSec = currentSettings.monitorIntervalSec,
+                                            reason = "Retrying after transient error: ${err.localizedMessage ?: "network"}",
+                                            workingMemory = workingMemory,
+                                            trace = trace
+                                        )
+                                        step++
+                                        continue
+                                    } else {
+                                        _uiState.value = AgentUiState.Error(
+                                            goal = goal,
+                                            message = err.localizedMessage ?: "AI planning failed.",
+                                            workingMemory = workingMemory,
+                                            trace = trace.toList()
+                                        )
+                                        return@launch
+                                    }
+                                }
+                            } finally {
+                                snapshot.screenshot?.recycle()
                             }
                         }
-                    } finally {
-                        snapshot.screenshot?.recycle()
                     }
 
                     if (!plannedAction.memoryNote.isNullOrBlank()) {
@@ -522,6 +681,20 @@ object AgentCoordinator {
 
                     val execResult = service.executeAction(plannedAction, snapshot)
                     val stepResultSummary = execResult.summary.ifBlank { targetSummary }
+                    if (!usedLocalCarromSolver && cacheMatch == null && execResult.success && currentSettings.useZeroApiActionCache) {
+                        pendingCacheCandidate = PendingCacheCandidate(
+                            goal = goal,
+                            packageName = snapshot.packageName,
+                            screenSignature = currentSig,
+                            interactiveNodeCount = interactiveNodeCount,
+                            action = plannedAction,
+                            targetNode = targetNode,
+                            hadConfirmedSafety = safetyCheck.needsConfirmation
+                        )
+                    } else if (!execResult.success && cacheMatch != null) {
+                        actionCacheStore?.removeEntry(cacheMatch.entry.cacheKey)
+                        lastReplayEntry = null
+                    }
                     lastOutcomeHint = "Previous step executed ${plannedAction.actionType.name}: $stepResultSummary " +
                         "[status=${if (execResult.success) finalStatus.name else "FAILED"}]. " +
                         "Reason was: ${plannedAction.reason}. Compare the new screenshot carefully: if it succeeded/pocketed, save learnedRule; if foul/missed/wrong, save foulOrMistakeLesson."
@@ -532,7 +705,11 @@ object AgentCoordinator {
                             timestampMs = System.currentTimeMillis(),
                             actionType = plannedAction.actionType,
                             targetSummary = stepResultSummary,
-                            reason = plannedAction.reason,
+                            reason = if (cacheMatch != null) {
+                                "Zero-API Cache Replay (0 API calls) — ${cacheMatch.entry.targetLabel}"
+                            } else {
+                                plannedAction.reason
+                            },
                             status = if (execResult.success) finalStatus else StepStatus.FAILED,
                             requiresConfirmation = safetyCheck.needsConfirmation
                         )

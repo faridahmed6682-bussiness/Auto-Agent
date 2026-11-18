@@ -110,4 +110,114 @@ class ExampleRobolectricTest {
         assertEquals(1, decoded[0].winningStrategies.size)
         assertEquals(1, decoded[0].foulLessons.size)
     }
+
+    @Test
+    fun `action cache serializes and parses entries cleanly`() {
+        val entry = com.example.agent.CachedActionEntry(
+            cacheKey = "abc1234567",
+            goalKeywords = "carrom_classic_play",
+            packageName = "com.miniclip.carrom",
+            screenSignature = "sig999",
+            actionType = AgentActionType.TAP,
+            targetLabel = "Play Classic",
+            targetViewId = "btn_play",
+            tapX = 190,
+            tapY = 340,
+            textToType = null,
+            hitCount = 3,
+            lastUsedMs = 123456789L
+        )
+        val encoded = com.example.agent.ActionCacheStore.serializeJson(listOf(entry))
+        val decoded = com.example.agent.ActionCacheStore.parseJson(encoded)
+
+        assertEquals(1, decoded.size)
+        assertEquals("btn_play", decoded[0].targetViewId)
+        assertEquals(3, decoded[0].hitCount)
+        assertEquals(190, decoded[0].tapX)
+    }
+
+    @Test
+    fun `visual grid annotator preserves dimensions without mutating source bitmap`() {
+        val source = android.graphics.Bitmap.createBitmap(540, 1200, android.graphics.Bitmap.Config.ARGB_8888)
+        source.eraseColor(android.graphics.Color.rgb(210, 180, 140))
+
+        val annotated = com.example.ai.VisualGridAnnotator.createAnnotatedCopy(
+            source = source,
+            screenWidth = 1080,
+            screenHeight = 2400
+        )
+
+        assertEquals(540, annotated.width)
+        assertEquals(1200, annotated.height)
+        assertFalse(annotated === source)
+        // Corner pixel at (0,0) of immutable source remains intact while annotated copy draws grid lines
+        assertEquals(android.graphics.Color.rgb(210, 180, 140), source.getPixel(108, 600))
+        annotated.recycle()
+        source.recycle()
+    }
+
+    @Test
+    fun `carrom vision detector finds painted discs and solves shot offline without AI calls`() {
+        com.example.game.CarromVisionDetector.resetMotionHistory()
+        val width = 540
+        val height = 1000
+        val bm = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+        // Warm tan carrom wooden background (neither white, black, red queen, nor cyan striker)
+        bm.eraseColor(android.graphics.Color.rgb(205, 165, 110))
+
+        fun paintDisc(cx: Float, cy: Float, r: Float, colorInt: Int) {
+            val rSq = r * r
+            val minX = (cx - r).toInt().coerceIn(0, width - 1)
+            val maxX = (cx + r).toInt().coerceIn(0, width - 1)
+            val minY = (cy - r).toInt().coerceIn(0, height - 1)
+            val maxY = (cy + r).toInt().coerceIn(0, height - 1)
+            for (y in minY..maxY) {
+                for (x in minX..maxX) {
+                    val dx = x - cx
+                    val dy = y - cy
+                    if (dx * dx + dy * dy <= rSq) {
+                        bm.setPixel(x, y, colorInt)
+                    }
+                }
+            }
+        }
+
+        val boardLeft = width * 0.06f
+        val boardWidth = width * 0.88f
+        val boardTop = (height - boardWidth) * 0.48f
+        val baselineY = boardTop + boardWidth * 0.855f
+
+        // Draw target white coin aimed comfortably toward top-left corner
+        paintDisc(boardLeft + boardWidth * 0.34f, boardTop + boardWidth * 0.36f, 15f, android.graphics.Color.rgb(248, 248, 245))
+        // Draw Queen near center
+        paintDisc(boardLeft + boardWidth * 0.50f, boardTop + boardWidth * 0.50f, 15f, android.graphics.Color.rgb(225, 28, 35))
+        // Draw cyan striker on baseline
+        paintDisc(boardLeft + boardWidth * 0.58f, baselineY, 18f, android.graphics.Color.rgb(0, 215, 235))
+
+        val outcome = com.example.game.CarromVisionDetector.analyzeAndSolve(
+            screenshot = bm,
+            screenWidth = 1080,
+            screenHeight = 2000,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            consecutiveOfflineWaits = 0
+        )
+
+        org.junit.Assert.assertTrue(
+            "Expected SolvedShot from local vision detector but got $outcome",
+            outcome is com.example.game.CarromVisionOutcome.SolvedShot
+        )
+
+        // Sudden large visual change on next frame triggers offline stillness wait (0 API)
+        bm.eraseColor(android.graphics.Color.rgb(30, 30, 30))
+        val motionOutcome = com.example.game.CarromVisionDetector.analyzeAndSolve(
+            screenshot = bm,
+            screenWidth = 1080,
+            screenHeight = 2000,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            consecutiveOfflineWaits = 0
+        )
+        org.junit.Assert.assertTrue(motionOutcome is com.example.game.CarromVisionOutcome.WaitStillnessOrTurn)
+        bm.recycle()
+        com.example.game.CarromVisionDetector.resetMotionHistory()
+    }
 }

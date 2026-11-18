@@ -8,6 +8,7 @@ import com.example.agent.AgentCoordinator
 import com.example.agent.AgentExecutionMode
 import com.example.agent.AgentSettings
 import com.example.agent.AgentUiState
+import com.example.agent.CachedActionEntry
 import com.example.agent.TaskPlaybook
 import com.example.service.TapPilotAccessibilityService
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,6 +31,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val isServiceConnected: StateFlow<Boolean> = AgentCoordinator.isServiceConnected
     val settings: StateFlow<AgentSettings> = AgentCoordinator.settings
     val playbooks: StateFlow<List<TaskPlaybook>> = AgentCoordinator.playbooks
+    val cachedActions: StateFlow<List<CachedActionEntry>> = AgentCoordinator.cachedActions
 
     private val _goalText = MutableStateFlow("")
     val goalText: StateFlow<String> = _goalText.asStateFlow()
@@ -117,6 +119,14 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deletePlaybook(topicKey: String) {
         AgentCoordinator.deletePlaybook(topicKey)
+    }
+
+    fun deleteCachedAction(cacheKey: String) {
+        AgentCoordinator.deleteCachedAction(cacheKey)
+    }
+
+    fun clearActionCache() {
+        AgentCoordinator.clearActionCache()
     }
 
     fun resetKeyFailoverHealth() {

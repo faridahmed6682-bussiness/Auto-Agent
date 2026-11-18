@@ -377,4 +377,253 @@ class AgentLogicUnitTest {
         )
         assertEquals(2, merged.size)
     }
+
+    @Test
+    fun `turbo dual key hedge uses single call when primary is fast and races secondary when primary is slow`() = kotlinx.coroutines.runBlocking {
+        com.example.ai.ApiKeyFailoverManager.resetHealth()
+        com.example.ai.ApiKeyFailoverManager.hedgeDelayMs = 80L
+
+        val settings = AgentSettings(
+            aiProvider = AiProvider.GOOGLE_AI_STUDIO,
+            googleAiStudioApiKey = "AIzaSyPrimaryFast001",
+            groqApiKey = "gsk_SecondaryFast002",
+            autoCrossProviderFailover = true,
+            routingStrategy = com.example.agent.AiRoutingStrategy.STICKY_FAILOVER,
+            turboDualKeyGameMode = true
+        )
+
+        // Case A: Primary finishes before hedgeDelay -> secondary is cancelled without making any call
+        val fastCalls = java.util.Collections.synchronizedList(mutableListOf<AiProvider>())
+        val fastResult = com.example.ai.ApiKeyFailoverManager.executeWithHedgeOrFailover(
+            settings = settings,
+            firebaseConfigured = false,
+            taskProfile = com.example.ai.AiTaskProfile.HIGH_ACCURACY,
+            enableHedgeRace = true
+        ) { provider, _, _ ->
+            fastCalls.add(provider)
+            "shot_from_${provider.name}"
+        }
+        assertEquals("shot_from_GOOGLE_AI_STUDIO", fastResult.value)
+        assertEquals(listOf(AiProvider.GOOGLE_AI_STUDIO), fastCalls)
+
+        // Case B: Primary is slow (> 80ms hedgeDelay) -> secondary starts in parallel and wins immediately
+        val slowCalls = java.util.Collections.synchronizedList(mutableListOf<AiProvider>())
+        val slowResult = com.example.ai.ApiKeyFailoverManager.executeWithHedgeOrFailover(
+            settings = settings,
+            firebaseConfigured = false,
+            taskProfile = com.example.ai.AiTaskProfile.HIGH_ACCURACY,
+            enableHedgeRace = true
+        ) { provider, _, _ ->
+            slowCalls.add(provider)
+            if (provider == AiProvider.GOOGLE_AI_STUDIO) {
+                kotlinx.coroutines.delay(900L)
+                "late_google"
+            } else {
+                "fast_groq_win"
+            }
+        }
+        assertEquals("fast_groq_win", slowResult.value)
+        assertEquals(AiProvider.GROQ_CLOUD, slowResult.providerUsed)
+        assertTrue(slowResult.wasHedged)
+        assertTrue(slowCalls.containsAll(listOf(AiProvider.GOOGLE_AI_STUDIO, AiProvider.GROQ_CLOUD)))
+        com.example.ai.ApiKeyFailoverManager.resetHealth()
+    }
+
+    @Test
+    fun `action cache verifies screen transition matches shifted live node and blocks game boards`() {
+        fun node(id: Int, label: String, viewId: String, left: Int, top: Int): ScreenNode = ScreenNode(
+            id = id,
+            className = "android.widget.Button",
+            text = label,
+            contentDesc = "",
+            viewId = viewId,
+            bounds = ScreenBounds(left, top, left + 180, top + 80),
+            isClickable = true,
+            isEditable = false,
+            isScrollable = false,
+            isChecked = false,
+            isFocused = false
+        )
+
+        val lobbyNodes = listOf(
+            node(1, "Play Classic", "btn_play", 100, 300),
+            node(2, "Disc Pool", "btn_pool", 100, 420),
+            node(3, "Friends", "btn_friends", 100, 540),
+            node(4, "Shop", "btn_shop", 100, 660)
+        )
+        val sigBefore = com.example.agent.ActionCacheStore.computeScreenSignature(lobbyNodes)
+        val playAction = PlannedAction(
+            actionType = AgentActionType.TAP,
+            targetNodeId = 1,
+            x = 190,
+            y = 340,
+            textToType = null,
+            waitSeconds = null,
+            memoryNote = null,
+            reason = "Tap Play Classic",
+            requiresConfirmation = false
+        )
+        val candidate = com.example.agent.PendingCacheCandidate(
+            goal = "Open Carrom and play classic match",
+            packageName = "com.miniclip.carrom",
+            screenSignature = sigBefore,
+            interactiveNodeCount = 4,
+            action = playAction,
+            targetNode = lobbyNodes[0],
+            hadConfirmedSafety = false
+        )
+
+        // Screen didn't change -> ineligible
+        val unchangedSnapshot = com.example.agent.UiSnapshot("com.miniclip.carrom", 1080, 2400, lobbyNodes, null, "")
+        assertFalse(com.example.agent.ActionCacheStore.isEligibleForCache(candidate, unchangedSnapshot))
+
+        // Screen transitioned to mode selection -> eligible!
+        val nextNodes = listOf(
+            node(1, "Matchmaking", "btn_match", 200, 500),
+            node(2, "Cancel", "btn_cancel", 200, 700),
+            node(3, "Paris", "btn_paris", 200, 900),
+            node(4, "Delhi", "btn_delhi", 200, 1100)
+        )
+        val nextSnapshot = com.example.agent.UiSnapshot("com.miniclip.carrom", 1080, 2400, nextNodes, null, "")
+        assertTrue(com.example.agent.ActionCacheStore.isEligibleForCache(candidate, nextSnapshot))
+
+        // Sparse game board (< 4 clickable nodes) -> never eligible for cache
+        val sparseCandidate = candidate.copy(interactiveNodeCount = 1)
+        assertFalse(com.example.agent.ActionCacheStore.isEligibleForCache(sparseCandidate, nextSnapshot))
+
+        // Cached entry resolves against shifted live node coordinates cleanly
+        val goalKeys = com.example.agent.ActionCacheStore.normalizeGoalKeywords("Open Carrom and play classic match")
+        val savedEntry = com.example.agent.CachedActionEntry(
+            cacheKey = com.example.agent.ActionCacheStore.buildCacheKey(goalKeys, "com.miniclip.carrom", sigBefore),
+            goalKeywords = goalKeys,
+            packageName = "com.miniclip.carrom",
+            screenSignature = sigBefore,
+            actionType = AgentActionType.TAP,
+            targetLabel = "Play Classic",
+            targetViewId = "btn_play",
+            tapX = 190,
+            tapY = 340,
+            textToType = null
+        )
+
+        val shiftedLobby = listOf(
+            node(9, "Play Classic", "btn_play", 400, 800),
+            node(2, "Disc Pool", "btn_pool", 100, 420),
+            node(3, "Friends", "btn_friends", 100, 540),
+            node(4, "Shop", "btn_shop", 100, 660)
+        )
+        val replaySnapshot = com.example.agent.UiSnapshot("com.miniclip.carrom", 1080, 2400, shiftedLobby, null, "")
+        val match = com.example.agent.ActionCacheStore.matchEntryFromList(listOf(savedEntry), "Play Carrom classic", replaySnapshot)
+        assertEquals(9, match?.action?.targetNodeId)
+        assertEquals(490, match?.action?.x)
+        assertEquals(840, match?.action?.y)
+    }
+
+    @Test
+    fun `carrom solver computes slingshot ghost ball shot avoiding obstacles and foul pockets`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 500f,
+            right = 1020f,
+            bottom = 1460f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 560f), // top-left
+                com.example.game.Point2D(960f, 560f), // top-right
+                com.example.game.Point2D(120f, 1400f), // bottom-left
+                com.example.game.Point2D(960f, 1400f)  // bottom-right
+            ),
+            baselineY = 1320f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+
+        // White target coin near top-left; black obstacle blocks top-right pocket path
+        val whiteTarget = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(310f, 750f),
+            radiusPx = 28f
+        )
+        val blockingBlack = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.BLACK,
+            center = com.example.game.Point2D(635f, 655f), // directly between (310,750) and top-right (960,560)
+            radiusPx = 28f
+        )
+
+        val solution = com.example.game.CarromGeometrySolver.solveBestShot(
+            board = board,
+            pieces = listOf(whiteTarget, blockingBlack),
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 1080,
+            screenHeight = 2400
+        )
+
+        org.junit.Assert.assertNotNull(solution)
+        val sol = solution!!
+        // Should aim for top-left pocket (120, 560), NOT blocked top-right
+        assertEquals(120f, sol.targetPocket.x, 1f)
+        assertEquals(560f, sol.targetPocket.y, 1f)
+        // Slingshot pulls back opposite the upward shot (dragEnd.y > strikerPos.y)
+        assertTrue(sol.dragEnd.y > sol.strikerPos.y)
+        assertFalse(sol.isBankShot)
+
+        // Straight-on follow-through into pocket must be flagged as a striker scratch foul
+        val dirToTopLeft = (com.example.game.Point2D(120f, 560f) - whiteTarget.center).normalized()
+        val scratchGhost = whiteTarget.center - dirToTopLeft * 63f
+        assertTrue(
+            com.example.game.CarromGeometrySolver.willStrikerScratchIntoPocket(
+                strikerPos = com.example.game.Point2D(500f, 1320f),
+                ghostBall = scratchGhost,
+                dirSg = dirToTopLeft,
+                dirCp = dirToTopLeft,
+                cutAngleDeg = 0f,
+                board = board
+            )
+        )
+    }
+
+    @Test
+    fun `carrom solver falls back to one rail bank shot when direct pocket paths are blocked`() {
+        val board = com.example.game.CarromBoardLayout(
+            left = 60f,
+            top = 500f,
+            right = 1020f,
+            bottom = 1460f,
+            pockets = listOf(
+                com.example.game.Point2D(120f, 560f),
+                com.example.game.Point2D(960f, 560f),
+                com.example.game.Point2D(120f, 1400f),
+                com.example.game.Point2D(960f, 1400f)
+            ),
+            baselineY = 1320f,
+            coinRadiusPx = 28f,
+            strikerRadiusPx = 35f,
+            pocketRadiusPx = 50f
+        )
+
+        val whiteCoin = com.example.game.CarromPiece(
+            color = com.example.game.CoinColor.WHITE,
+            center = com.example.game.Point2D(540f, 820f),
+            radiusPx = 28f
+        )
+        // Place 4 blocker black coins between whiteCoin and each of the 4 pockets
+        val blockers = board.pockets.map { pocket ->
+            val mid = com.example.game.Point2D(
+                (whiteCoin.center.x + pocket.x) * 0.5f,
+                (whiteCoin.center.y + pocket.y) * 0.5f
+            )
+            com.example.game.CarromPiece(com.example.game.CoinColor.BLACK, mid, 28f)
+        }
+
+        val bankShot = com.example.game.CarromGeometrySolver.solveBestShot(
+            board = board,
+            pieces = listOf(whiteCoin) + blockers,
+            myCoinColor = com.example.game.CoinColor.WHITE,
+            screenWidth = 1080,
+            screenHeight = 2400
+        )
+
+        org.junit.Assert.assertNotNull(bankShot)
+        assertTrue(bankShot!!.isBankShot)
+    }
 }

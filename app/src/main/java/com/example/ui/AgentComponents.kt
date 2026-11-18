@@ -106,6 +106,7 @@ import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.ui.platform.LocalContext
 import com.example.agent.AiRoutingStrategy
+import com.example.agent.CachedActionEntry
 import com.example.agent.SafetyPolicyMode
 import com.example.agent.StepStatus
 import com.example.agent.TaskPlaybook
@@ -771,6 +772,141 @@ fun PlaybookLibraryCard(
                                             color = AmberWarning
                                         )
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ActionCacheLibraryCard(
+    cachedActions: List<CachedActionEntry>,
+    onDeleteEntry: (String) -> Unit,
+    onClearAll: () -> Unit
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val totalReuses = remember(cachedActions) {
+        cachedActions.sumOf { (it.hitCount - 1).coerceAtLeast(0) }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = SlateSurface),
+        border = BorderStroke(1.dp, SlateBorder),
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .minimumInteractiveComponentSize(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Bolt,
+                        contentDescription = null,
+                        tint = ElectricCyan,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.action_cache_section_title),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (totalReuses > 0) {
+                            "${cachedActions.size} saved • ${totalReuses}x 0-API"
+                        } else {
+                            "${cachedActions.size} saved"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (cachedActions.isEmpty()) TextSecondary else ElectricCyan
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        contentDescription = null,
+                        tint = TextSecondary
+                    )
+                }
+            }
+
+            if (expanded) {
+                Spacer(modifier = Modifier.height(8.dp))
+                if (cachedActions.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.action_cache_empty_hint),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = onClearAll,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("clear_action_cache_button")
+                        ) {
+                            Text(
+                                text = stringResource(R.string.action_clear_cache),
+                                color = AmberWarning
+                            )
+                        }
+                    }
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        cachedActions.take(8).forEach { entry ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(SlateSurfaceElevated)
+                                    .border(1.dp, SlateBorder, RoundedCornerShape(10.dp))
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${entry.actionType.name}: ${entry.targetLabel}",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${entry.packageName} • Used ${entry.hitCount}x (0 API)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = CyberTeal,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onDeleteEntry(entry.cacheKey) },
+                                    modifier = Modifier.minimumInteractiveComponentSize()
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.DeleteOutline,
+                                        contentDescription = stringResource(R.string.cd_delete_cached_action),
+                                        tint = TextSecondary
+                                    )
                                 }
                             }
                         }
@@ -1453,6 +1589,42 @@ fun AgentSettingsSheet(
                 checked = settings.smartTextFastPath,
                 onCheckedChange = { enabled ->
                     onUpdate { it.copy(smartTextFastPath = enabled) }
+                }
+            )
+
+            SettingSwitchRow(
+                title = stringResource(R.string.settings_turbo_hedge_label),
+                subtitle = stringResource(R.string.settings_turbo_hedge_desc),
+                checked = settings.turboDualKeyGameMode,
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(turboDualKeyGameMode = enabled) }
+                }
+            )
+
+            SettingSwitchRow(
+                title = stringResource(R.string.settings_zero_api_cache_label),
+                subtitle = stringResource(R.string.settings_zero_api_cache_desc),
+                checked = settings.useZeroApiActionCache,
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(useZeroApiActionCache = enabled) }
+                }
+            )
+
+            SettingSwitchRow(
+                title = stringResource(R.string.settings_carrom_solver_label),
+                subtitle = stringResource(R.string.settings_carrom_solver_desc),
+                checked = settings.carromPrecisionSolver,
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(carromPrecisionSolver = enabled) }
+                }
+            )
+
+            SettingSwitchRow(
+                title = stringResource(R.string.settings_coordinate_grid_label),
+                subtitle = stringResource(R.string.settings_coordinate_grid_desc),
+                checked = settings.useCoordinateGridOverlay,
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(useCoordinateGridOverlay = enabled) }
                 }
             )
 

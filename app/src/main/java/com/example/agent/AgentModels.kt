@@ -197,6 +197,21 @@ data class TaskPlaybook(
     }
 }
 
+data class CachedActionEntry(
+    val cacheKey: String,
+    val goalKeywords: String,
+    val packageName: String,
+    val screenSignature: String,
+    val actionType: AgentActionType,
+    val targetLabel: String,
+    val targetViewId: String,
+    val tapX: Int?,
+    val tapY: Int?,
+    val textToType: String?,
+    val hitCount: Int = 1,
+    val lastUsedMs: Long = System.currentTimeMillis()
+)
+
 enum class StepStatus {
     EXECUTED,
     WAITING,
@@ -289,6 +304,10 @@ data class AgentSettings(
     val autoCrossProviderFailover: Boolean = true,
     val routingStrategy: AiRoutingStrategy = AiRoutingStrategy.SMART_HYBRID,
     val smartTextFastPath: Boolean = true,
+    val turboDualKeyGameMode: Boolean = true,
+    val useZeroApiActionCache: Boolean = true,
+    val carromPrecisionSolver: Boolean = true,
+    val useCoordinateGridOverlay: Boolean = true,
     val maxSteps: Int = 20,
     val monitorIntervalSec: Int = 30,
     val useVisionScreenshot: Boolean = true,

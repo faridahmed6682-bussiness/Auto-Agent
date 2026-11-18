@@ -31,6 +31,10 @@ class AgentSettingsStore(private val context: Context) {
         val AUTO_CROSS_PROVIDER_FAILOVER = booleanPreferencesKey("auto_cross_provider_failover")
         val ROUTING_STRATEGY = stringPreferencesKey("routing_strategy")
         val SMART_TEXT_FAST_PATH = booleanPreferencesKey("smart_text_fast_path")
+        val TURBO_DUAL_KEY_GAME_MODE = booleanPreferencesKey("turbo_dual_key_game_mode")
+        val USE_ZERO_API_ACTION_CACHE = booleanPreferencesKey("use_zero_api_action_cache")
+        val CARROM_PRECISION_SOLVER = booleanPreferencesKey("carrom_precision_solver")
+        val USE_COORDINATE_GRID_OVERLAY = booleanPreferencesKey("use_coordinate_grid_overlay")
         val MAX_STEPS = intPreferencesKey("max_steps")
         val MONITOR_INTERVAL_SEC = intPreferencesKey("monitor_interval_sec")
         val USE_VISION = booleanPreferencesKey("use_vision_screenshot")
@@ -62,6 +66,10 @@ class AgentSettingsStore(private val context: Context) {
             prefs[Keys.AUTO_CROSS_PROVIDER_FAILOVER] = updated.autoCrossProviderFailover
             prefs[Keys.ROUTING_STRATEGY] = updated.routingStrategy.name
             prefs[Keys.SMART_TEXT_FAST_PATH] = updated.smartTextFastPath
+            prefs[Keys.TURBO_DUAL_KEY_GAME_MODE] = updated.turboDualKeyGameMode
+            prefs[Keys.USE_ZERO_API_ACTION_CACHE] = updated.useZeroApiActionCache
+            prefs[Keys.CARROM_PRECISION_SOLVER] = updated.carromPrecisionSolver
+            prefs[Keys.USE_COORDINATE_GRID_OVERLAY] = updated.useCoordinateGridOverlay
             prefs[Keys.MAX_STEPS] = updated.maxSteps.coerceIn(5, 50)
             prefs[Keys.MONITOR_INTERVAL_SEC] = updated.monitorIntervalSec.coerceIn(10, 300)
             prefs[Keys.USE_VISION] = updated.useVisionScreenshot
@@ -106,6 +114,10 @@ class AgentSettingsStore(private val context: Context) {
             autoCrossProviderFailover = prefs[Keys.AUTO_CROSS_PROVIDER_FAILOVER] ?: true,
             routingStrategy = routingStrategy,
             smartTextFastPath = prefs[Keys.SMART_TEXT_FAST_PATH] ?: true,
+            turboDualKeyGameMode = prefs[Keys.TURBO_DUAL_KEY_GAME_MODE] ?: true,
+            useZeroApiActionCache = prefs[Keys.USE_ZERO_API_ACTION_CACHE] ?: true,
+            carromPrecisionSolver = prefs[Keys.CARROM_PRECISION_SOLVER] ?: true,
+            useCoordinateGridOverlay = prefs[Keys.USE_COORDINATE_GRID_OVERLAY] ?: true,
             maxSteps = (prefs[Keys.MAX_STEPS] ?: 20).coerceIn(5, 50),
             monitorIntervalSec = (prefs[Keys.MONITOR_INTERVAL_SEC] ?: 30).coerceIn(10, 300),
             useVisionScreenshot = prefs[Keys.USE_VISION] ?: true,
