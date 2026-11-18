@@ -74,6 +74,7 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -98,9 +99,18 @@ import com.example.agent.AgentSettings
 import com.example.agent.AgentStepLog
 import com.example.agent.AgentUiState
 import com.example.agent.AiProvider
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.rounded.AutoFixHigh
+import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.ui.platform.LocalContext
+import com.example.agent.AiRoutingStrategy
 import com.example.agent.SafetyPolicyMode
 import com.example.agent.StepStatus
 import com.example.agent.TaskPlaybook
+import com.example.ai.ApiKeyFailoverManager
+import com.example.ai.BulkKeyImporter
 import com.example.ui.theme.AmberContainer
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CrimsonContainer
@@ -296,7 +306,11 @@ fun CommandDeckCard(
     val isPaused = agentState is AgentUiState.Paused
     val isConfirming = agentState is AgentUiState.AwaitingConfirmation
     val isBusy = isRunning || isPaused || isConfirming
-    val keyMissing = settings.aiProvider.requiresApiKey && settings.activeApiKey().isBlank()
+    val providerKeys = settings.apiKeysFor(settings.aiProvider)
+    val totalPoolKeys = settings.totalConfiguredKeyCount()
+    val keyMissing = settings.aiProvider.requiresApiKey &&
+        providerKeys.isEmpty() &&
+        (!settings.autoCrossProviderFailover || totalPoolKeys == 0)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -345,6 +359,10 @@ fun CommandDeckCard(
                             }
                         } else if (keyMissing) {
                             "${settings.aiProvider.shortBadge} • Key Needed"
+                        } else if (settings.aiProvider.requiresApiKey && providerKeys.isNotEmpty()) {
+                            "${settings.aiProvider.shortBadge} (${providerKeys.size})"
+                        } else if (settings.aiProvider.requiresApiKey && totalPoolKeys > 0) {
+                            "Failover Pool ($totalPoolKeys)"
                         } else {
                             settings.aiProvider.shortBadge
                         },
@@ -847,8 +865,14 @@ fun AgentOutcomeBanner(state: AgentUiState) {
                 border = BorderStroke(1.dp, CyberTeal.copy(alpha = 0.6f))
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
+                    val activeRoute = ApiKeyFailoverManager.getLastRouteLabel()
+                    val headerText = if (activeRoute.isNotBlank()) {
+                        "${state.phase.label} • $activeRoute"
+                    } else {
+                        state.phase.label
+                    }
                     Text(
-                        text = state.phase.label,
+                        text = headerText,
                         style = MaterialTheme.typography.labelSmall,
                         color = CyberTeal
                     )
@@ -1031,13 +1055,59 @@ fun EmptyTraceCard() {
 fun AgentSettingsSheet(
     settings: AgentSettings,
     onUpdate: ((AgentSettings) -> AgentSettings) -> Unit,
+    onResetKeyHealth: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     var showApiKey by rememberSaveable { mutableStateOf(false) }
+    var healthResetTick by remember { mutableStateOf(0) }
+    var bulkImportNotice by remember { mutableStateOf<String?>(null) }
 
     val provider = settings.aiProvider
-    var localApiKey by remember(provider) { mutableStateOf(settings.activeApiKey()) }
-    var localModel by remember(provider) { mutableStateOf(settings.activeModelName()) }
+    var localKeyBlock by remember(provider) { mutableStateOf(settings.rawKeyBlockFor(provider)) }
+    var localModel by remember(provider) { mutableStateOf(settings.modelNameFor(provider)) }
+    val parsedKeys = remember(localKeyBlock) { AgentSettings.parseApiKeys(localKeyBlock) }
+    val failedCount = remember(provider, healthResetTick) {
+        ApiKeyFailoverManager.getFailedCount(provider)
+    }
+    val cooldownCount = remember(provider, healthResetTick) {
+        ApiKeyFailoverManager.getCooldownCount(provider)
+    }
+    val activeSlot = remember(provider, parsedKeys.size, healthResetTick) {
+        if (parsedKeys.isNotEmpty()) {
+            ApiKeyFailoverManager.getActiveKeyPosition(provider, parsedKeys.size) + 1
+        } else {
+            0
+        }
+    }
+
+    val bulkKeyFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val rawContent = runCatching {
+            context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.orEmpty()
+        }.getOrNull()
+
+        if (rawContent.isNullOrBlank()) {
+            bulkImportNotice = "Could not read keys from selected file."
+            return@rememberLauncherForActivityResult
+        }
+
+        val (updatedSettings, summary) = BulkKeyImporter.importIntoSettings(
+            rawContent = rawContent,
+            currentSettings = settings,
+            fallbackProvider = provider
+        )
+        if (summary.totalImported == 0) {
+            bulkImportNotice = "No valid API keys found in file."
+        } else {
+            onUpdate { updatedSettings }
+            localKeyBlock = updatedSettings.rawKeyBlockFor(provider)
+            bulkImportNotice = "Imported ${summary.totalImported} key(s) (+${summary.newlyAddedCount} new): " +
+                "AI Studio ${summary.googleCount}, Groq ${summary.groqCount}, OpenRouter ${summary.openRouterCount}"
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -1099,19 +1169,21 @@ fun AgentSettingsSheet(
                 )
             } else {
                 OutlinedTextField(
-                    value = localApiKey,
+                    value = localKeyBlock,
                     onValueChange = { newVal ->
-                        localApiKey = newVal
+                        localKeyBlock = newVal
                         onUpdate { current ->
                             when (provider) {
                                 AiProvider.GOOGLE_AI_STUDIO -> current.copy(googleAiStudioApiKey = newVal)
-                                AiProvider.XAI_GROK -> current.copy(grokApiKey = newVal)
+                                AiProvider.GROQ_CLOUD -> current.copy(groqApiKey = newVal)
                                 AiProvider.OPENROUTER -> current.copy(openRouterApiKey = newVal)
                                 AiProvider.FIREBASE_AI -> current
                             }
                         }
                     },
-                    singleLine = true,
+                    singleLine = false,
+                    minLines = 3,
+                    maxLines = 6,
                     visualTransformation = if (showApiKey) {
                         VisualTransformation.None
                     } else {
@@ -1121,6 +1193,7 @@ fun AgentSettingsSheet(
                         .fillMaxWidth()
                         .testTag("api_key_input"),
                     label = { Text("${provider.displayName} ${stringResource(R.string.settings_api_key_label)}") },
+                    placeholder = { Text(stringResource(R.string.settings_api_key_placeholder)) },
                     trailingIcon = {
                         IconButton(
                             onClick = { showApiKey = !showApiKey },
@@ -1139,6 +1212,160 @@ fun AgentSettingsSheet(
                     )
                 )
 
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            bulkKeyFileLauncher.launch(arrayOf("text/*", "application/json", "*/*"))
+                        },
+                        border = BorderStroke(1.dp, CyberTeal.copy(alpha = 0.65f)),
+                        modifier = Modifier
+                            .weight(1f)
+                            .minimumInteractiveComponentSize()
+                            .testTag("bulk_upload_keys_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.UploadFile,
+                            contentDescription = null,
+                            tint = CyberTeal,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = stringResource(R.string.settings_bulk_upload_file),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = CyberTeal
+                        )
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val (sortedSettings, summary) = BulkKeyImporter.redistributeMixedBlock(
+                                mixedText = localKeyBlock,
+                                currentSettings = settings,
+                                sourceProvider = provider
+                            )
+                            onUpdate { sortedSettings }
+                            localKeyBlock = sortedSettings.rawKeyBlockFor(provider)
+                            bulkImportNotice = if (summary.totalImported == 0) {
+                                "Paste mixed keys above first to auto-sort."
+                            } else {
+                                "Sorted ${summary.totalImported} key(s): AI Studio ${summary.googleCount}, Groq ${summary.groqCount}, OpenRouter ${summary.openRouterCount}"
+                            }
+                        },
+                        enabled = localKeyBlock.isNotBlank(),
+                        border = BorderStroke(1.dp, SlateBorder),
+                        modifier = Modifier
+                            .weight(1f)
+                            .minimumInteractiveComponentSize()
+                            .testTag("auto_sort_keys_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AutoFixHigh,
+                            contentDescription = null,
+                            tint = ElectricCyan,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = stringResource(R.string.settings_bulk_auto_sort),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = ElectricCyan
+                        )
+                    }
+                }
+
+                bulkImportNotice?.let { notice ->
+                    Text(
+                        text = notice,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = ElectricCyan
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    val statusText = if (parsedKeys.isEmpty()) {
+                        "0 keys loaded (Pool total: ${settings.totalConfiguredKeyCount()})"
+                    } else {
+                        val parts = mutableListOf("${parsedKeys.size} ready", "Cursor #$activeSlot")
+                        if (cooldownCount > 0) parts.add("$cooldownCount in 65s cooldown")
+                        if (failedCount > 0) parts.add("$failedCount invalid")
+                        parts.joinToString(" • ")
+                    }
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (parsedKeys.isEmpty()) AmberWarning else CyberTeal,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (failedCount > 0 || cooldownCount > 0 || parsedKeys.size > 1) {
+                        TextButton(
+                            onClick = {
+                                onResetKeyHealth()
+                                healthResetTick++
+                            },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("reset_key_health_button")
+                        ) {
+                            Text(
+                                text = stringResource(R.string.settings_reset_key_health),
+                                color = ElectricCyan
+                            )
+                        }
+                    }
+                }
+
+                Text(
+                    text = stringResource(R.string.settings_free_models_label),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextSecondary
+                )
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    provider.freeModels.forEach { option ->
+                        FilterChip(
+                            selected = localModel.trim() == option.id,
+                            onClick = {
+                                localModel = option.id
+                                onUpdate { current ->
+                                    when (provider) {
+                                        AiProvider.GOOGLE_AI_STUDIO -> current.copy(googleAiStudioModel = option.id)
+                                        AiProvider.GROQ_CLOUD -> current.copy(groqModel = option.id)
+                                        AiProvider.OPENROUTER -> current.copy(openRouterModel = option.id)
+                                        AiProvider.FIREBASE_AI -> current
+                                    }
+                                }
+                            },
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("free_model_${option.id}"),
+                            label = {
+                                Text(
+                                    text = option.label,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = CyberTealDark,
+                                selectedLabelColor = CyberTeal
+                            )
+                        )
+                    }
+                }
+
                 OutlinedTextField(
                     value = localModel,
                     onValueChange = { newModel ->
@@ -1146,7 +1373,7 @@ fun AgentSettingsSheet(
                         onUpdate { current ->
                             when (provider) {
                                 AiProvider.GOOGLE_AI_STUDIO -> current.copy(googleAiStudioModel = newModel)
-                                AiProvider.XAI_GROK -> current.copy(grokModel = newModel)
+                                AiProvider.GROQ_CLOUD -> current.copy(groqModel = newModel)
                                 AiProvider.OPENROUTER -> current.copy(openRouterModel = newModel)
                                 AiProvider.FIREBASE_AI -> current
                             }
@@ -1165,7 +1392,7 @@ fun AgentSettingsSheet(
                     )
                 )
 
-                if (localApiKey.isBlank()) {
+                if (parsedKeys.isEmpty()) {
                     Text(
                         text = stringResource(R.string.settings_api_key_missing),
                         style = MaterialTheme.typography.bodyMedium,
@@ -1175,6 +1402,59 @@ fun AgentSettingsSheet(
             }
 
             HorizontalDivider(color = SlateBorder)
+
+            Text(
+                text = stringResource(R.string.settings_routing_section),
+                style = MaterialTheme.typography.titleMedium
+            )
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                AiRoutingStrategy.entries.forEach { strategy ->
+                    FilterChip(
+                        selected = settings.routingStrategy == strategy,
+                        onClick = { onUpdate { it.copy(routingStrategy = strategy) } },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("routing_${strategy.name.lowercase()}"),
+                        label = { Text(strategy.label) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = CyberTealDark,
+                            selectedLabelColor = CyberTeal
+                        )
+                    )
+                }
+            }
+
+            Text(
+                text = if (settings.routingStrategy == AiRoutingStrategy.SMART_HYBRID) {
+                    stringResource(R.string.settings_routing_hybrid_desc)
+                } else {
+                    stringResource(R.string.settings_routing_sticky_desc)
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextSecondary
+            )
+
+            SettingSwitchRow(
+                title = stringResource(R.string.settings_cross_failover_label),
+                subtitle = stringResource(R.string.settings_cross_failover_desc),
+                checked = settings.autoCrossProviderFailover,
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(autoCrossProviderFailover = enabled) }
+                }
+            )
+
+            SettingSwitchRow(
+                title = stringResource(R.string.settings_smart_fast_path_label),
+                subtitle = stringResource(R.string.settings_smart_fast_path_desc),
+                checked = settings.smartTextFastPath,
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(smartTextFastPath = enabled) }
+                }
+            )
 
             SettingSwitchRow(
                 title = stringResource(R.string.settings_vision_label),

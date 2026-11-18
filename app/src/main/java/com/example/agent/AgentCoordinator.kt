@@ -2,6 +2,7 @@ package com.example.agent
 
 import android.content.Context
 import android.util.Log
+import com.example.ai.ApiKeyFailoverManager
 import com.example.ai.GeminiAiPlanner
 import com.example.service.AgentKeepAliveService
 import com.example.service.TapPilotAccessibilityService
@@ -117,6 +118,10 @@ object AgentCoordinator {
         }
     }
 
+    fun resetKeyFailoverHealth() {
+        ApiKeyFailoverManager.resetHealth()
+    }
+
     fun startTask(
         goalInput: String,
         mode: AgentExecutionMode = AgentExecutionMode.SINGLE_SESSION
@@ -144,10 +149,11 @@ object AgentCoordinator {
         }
 
         val initialSettings = _settings.value
-        if (initialSettings.aiProvider.requiresApiKey && initialSettings.activeApiKey().isBlank()) {
+        val firebaseReady = aiPlanner.isFirebaseConfigured()
+        if (!initialSettings.hasAnyRunnableKey(firebaseReady)) {
             _uiState.value = AgentUiState.Error(
                 goal = goal,
-                message = "Missing API key for ${initialSettings.aiProvider.displayName}. Open Settings to enter your key.",
+                message = "No active API key configured. Open Settings and paste 1–30 free keys for Google AI Studio, Groq Cloud, or OpenRouter.",
                 workingMemory = "",
                 trace = emptyList()
             )
@@ -297,7 +303,12 @@ object AgentCoordinator {
                         }
 
                         planResult.getOrElse { err ->
-                            if (mode == AgentExecutionMode.CONTINUOUS_MONITOR) {
+                            val msg = err.localizedMessage ?: "AI planning failed."
+                            val isConfigOrAuthError = msg.contains("Firebase is not", ignoreCase = true) ||
+                                msg.contains("Missing API key", ignoreCase = true) ||
+                                msg.contains("HTTP 401") ||
+                                msg.contains("HTTP 403")
+                            if (mode == AgentExecutionMode.CONTINUOUS_MONITOR && !isConfigOrAuthError) {
                                 // Recoverable network/transient hiccup in all-day monitor: wait and retry
                                 appendTrace(
                                     trace,
@@ -306,7 +317,7 @@ object AgentCoordinator {
                                         timestampMs = System.currentTimeMillis(),
                                         actionType = AgentActionType.WAIT,
                                         targetSummary = "Transient AI error",
-                                        reason = err.localizedMessage ?: "Retrying after monitor interval...",
+                                        reason = msg,
                                         status = StepStatus.WAITING,
                                         requiresConfirmation = false
                                     )
@@ -721,6 +732,10 @@ object AgentCoordinator {
         is AgentUiState.AwaitingConfirmation -> state.goal
         is AgentUiState.Completed -> state.goal
         is AgentUiState.Error -> state.goal
+    }
+
+    private fun isFirebaseConfigured(): Boolean {
+        return runCatching { com.google.firebase.FirebaseApp.getInstance() }.isSuccess
     }
 
     private fun extractMemory(state: AgentUiState): String = when (state) {

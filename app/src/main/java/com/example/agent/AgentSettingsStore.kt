@@ -22,10 +22,15 @@ class AgentSettingsStore(private val context: Context) {
         val AI_PROVIDER = stringPreferencesKey("ai_provider")
         val GOOGLE_AI_STUDIO_KEY = stringPreferencesKey("google_ai_studio_key")
         val GOOGLE_AI_STUDIO_MODEL = stringPreferencesKey("google_ai_studio_model")
-        val GROK_KEY = stringPreferencesKey("grok_key")
-        val GROK_MODEL = stringPreferencesKey("grok_model")
+        val GROQ_KEY = stringPreferencesKey("groq_key")
+        val GROQ_MODEL = stringPreferencesKey("groq_model")
+        val LEGACY_GROK_KEY = stringPreferencesKey("grok_key")
+        val LEGACY_GROK_MODEL = stringPreferencesKey("grok_model")
         val OPENROUTER_KEY = stringPreferencesKey("openrouter_key")
         val OPENROUTER_MODEL = stringPreferencesKey("openrouter_model")
+        val AUTO_CROSS_PROVIDER_FAILOVER = booleanPreferencesKey("auto_cross_provider_failover")
+        val ROUTING_STRATEGY = stringPreferencesKey("routing_strategy")
+        val SMART_TEXT_FAST_PATH = booleanPreferencesKey("smart_text_fast_path")
         val MAX_STEPS = intPreferencesKey("max_steps")
         val MONITOR_INTERVAL_SEC = intPreferencesKey("monitor_interval_sec")
         val USE_VISION = booleanPreferencesKey("use_vision_screenshot")
@@ -48,12 +53,15 @@ class AgentSettingsStore(private val context: Context) {
             prefs[Keys.GOOGLE_AI_STUDIO_KEY] = updated.googleAiStudioApiKey.trim()
             prefs[Keys.GOOGLE_AI_STUDIO_MODEL] = updated.googleAiStudioModel.trim()
                 .ifBlank { AiProvider.GOOGLE_AI_STUDIO.defaultModel }
-            prefs[Keys.GROK_KEY] = updated.grokApiKey.trim()
-            prefs[Keys.GROK_MODEL] = updated.grokModel.trim()
-                .ifBlank { AiProvider.XAI_GROK.defaultModel }
+            prefs[Keys.GROQ_KEY] = updated.groqApiKey.trim()
+            prefs[Keys.GROQ_MODEL] = updated.groqModel.trim()
+                .ifBlank { AiProvider.GROQ_CLOUD.defaultModel }
             prefs[Keys.OPENROUTER_KEY] = updated.openRouterApiKey.trim()
             prefs[Keys.OPENROUTER_MODEL] = updated.openRouterModel.trim()
                 .ifBlank { AiProvider.OPENROUTER.defaultModel }
+            prefs[Keys.AUTO_CROSS_PROVIDER_FAILOVER] = updated.autoCrossProviderFailover
+            prefs[Keys.ROUTING_STRATEGY] = updated.routingStrategy.name
+            prefs[Keys.SMART_TEXT_FAST_PATH] = updated.smartTextFastPath
             prefs[Keys.MAX_STEPS] = updated.maxSteps.coerceIn(5, 50)
             prefs[Keys.MONITOR_INTERVAL_SEC] = updated.monitorIntervalSec.coerceIn(10, 300)
             prefs[Keys.USE_VISION] = updated.useVisionScreenshot
@@ -66,24 +74,38 @@ class AgentSettingsStore(private val context: Context) {
     }
 
     private fun readSettings(prefs: Preferences): AgentSettings {
-        val provider = prefs[Keys.AI_PROVIDER]
-            ?.let { runCatching { AiProvider.valueOf(it) }.getOrNull() }
-            ?: AiProvider.FIREBASE_AI
+        val rawProvider = prefs[Keys.AI_PROVIDER]
+        val provider = when (rawProvider) {
+            "XAI_GROK" -> AiProvider.GROQ_CLOUD
+            null -> AiProvider.GOOGLE_AI_STUDIO
+            else -> runCatching { AiProvider.valueOf(rawProvider) }.getOrNull()
+                ?: AiProvider.GOOGLE_AI_STUDIO
+        }
         val safetyMode = prefs[Keys.SAFETY_POLICY_MODE]
             ?.let { runCatching { SafetyPolicyMode.valueOf(it) }.getOrNull() }
             ?: SafetyPolicyMode.PAYMENT_ONLY
+        val routingStrategy = prefs[Keys.ROUTING_STRATEGY]
+            ?.let { runCatching { AiRoutingStrategy.valueOf(it) }.getOrNull() }
+            ?: AiRoutingStrategy.SMART_HYBRID
+
+        val rawGroqKey = prefs[Keys.GROQ_KEY] ?: prefs[Keys.LEGACY_GROK_KEY].orEmpty()
+        val rawGroqModel = (prefs[Keys.GROQ_MODEL] ?: prefs[Keys.LEGACY_GROK_MODEL])
+            ?.takeIf { it.isNotBlank() && !it.startsWith("grok-") }
+            ?: AiProvider.GROQ_CLOUD.defaultModel
 
         return AgentSettings(
             aiProvider = provider,
             googleAiStudioApiKey = prefs[Keys.GOOGLE_AI_STUDIO_KEY].orEmpty(),
             googleAiStudioModel = prefs[Keys.GOOGLE_AI_STUDIO_MODEL]
                 ?.takeIf { it.isNotBlank() } ?: AiProvider.GOOGLE_AI_STUDIO.defaultModel,
-            grokApiKey = prefs[Keys.GROK_KEY].orEmpty(),
-            grokModel = prefs[Keys.GROK_MODEL]
-                ?.takeIf { it.isNotBlank() } ?: AiProvider.XAI_GROK.defaultModel,
+            groqApiKey = rawGroqKey,
+            groqModel = rawGroqModel,
             openRouterApiKey = prefs[Keys.OPENROUTER_KEY].orEmpty(),
             openRouterModel = prefs[Keys.OPENROUTER_MODEL]
                 ?.takeIf { it.isNotBlank() } ?: AiProvider.OPENROUTER.defaultModel,
+            autoCrossProviderFailover = prefs[Keys.AUTO_CROSS_PROVIDER_FAILOVER] ?: true,
+            routingStrategy = routingStrategy,
+            smartTextFastPath = prefs[Keys.SMART_TEXT_FAST_PATH] ?: true,
             maxSteps = (prefs[Keys.MAX_STEPS] ?: 20).coerceIn(5, 50),
             monitorIntervalSec = (prefs[Keys.MONITOR_INTERVAL_SEC] ?: 30).coerceIn(10, 300),
             useVisionScreenshot = prefs[Keys.USE_VISION] ?: true,

@@ -2,35 +2,64 @@ package com.example.agent
 
 import android.graphics.Bitmap
 
+data class FreeModelOption(
+    val id: String,
+    val label: String,
+    val supportsVision: Boolean
+)
+
 enum class AiProvider(
     val displayName: String,
     val shortBadge: String,
     val defaultModel: String,
-    val requiresApiKey: Boolean
+    val requiresApiKey: Boolean,
+    val freeModels: List<FreeModelOption>
 ) {
+    GOOGLE_AI_STUDIO(
+        displayName = "Google AI Studio",
+        shortBadge = "AI Studio Free",
+        defaultModel = "gemini-3.1-flash-lite-preview",
+        requiresApiKey = true,
+        freeModels = listOf(
+            FreeModelOption("gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash-Lite (Fast Vision)", true),
+            FreeModelOption("gemini-2.5-flash", "Gemini 2.5 Flash (Vision)", true),
+            FreeModelOption("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite (High Quota)", true),
+            FreeModelOption("gemini-2.0-flash", "Gemini 2.0 Flash (Vision)", true)
+        )
+    ),
+    GROQ_CLOUD(
+        displayName = "Groq Cloud",
+        shortBadge = "Groq Free",
+        defaultModel = "meta-llama/llama-4-scout-17b-16e-instruct",
+        requiresApiKey = true,
+        freeModels = listOf(
+            FreeModelOption("meta-llama/llama-4-scout-17b-16e-instruct", "Llama 4 Scout 17B (Vision)", true),
+            FreeModelOption("meta-llama/llama-4-maverick-17b-128e-instruct", "Llama 4 Maverick 17B (Vision)", true),
+            FreeModelOption("llama-3.3-70b-versatile", "Llama 3.3 70B (UI Tree)", false),
+            FreeModelOption("qwen/qwen3-32b", "Qwen 3 32B (UI Tree)", false)
+        )
+    ),
+    OPENROUTER(
+        displayName = "OpenRouter",
+        shortBadge = "OpenRouter Free",
+        defaultModel = "openrouter/free",
+        requiresApiKey = true,
+        freeModels = listOf(
+            FreeModelOption("openrouter/free", "Free Auto-Router (Smart Vision)", true),
+            FreeModelOption("nvidia/nemotron-3.5-super-vl:free", "Nemotron 3.5 Super VL (Vision)", true),
+            FreeModelOption("google/gemma-4-31b-it:free", "Gemma 4 31B IT (Vision)", true),
+            FreeModelOption("google/gemma-4-26b-a4b-it:free", "Gemma 4 26B A4B (Vision)", true),
+            FreeModelOption("nvidia/nemotron-3-ultra-550b-a55b:free", "Nemotron 3 Ultra 550B (UI Tree)", false)
+        )
+    ),
     FIREBASE_AI(
         displayName = "Firebase AI (Built-in)",
         shortBadge = "Firebase Gemini",
         defaultModel = "gemini-3.8-flash",
-        requiresApiKey = false
-    ),
-    GOOGLE_AI_STUDIO(
-        displayName = "Google AI Studio",
-        shortBadge = "AI Studio Key",
-        defaultModel = "gemini-2.5-flash",
-        requiresApiKey = true
-    ),
-    XAI_GROK(
-        displayName = "Grok (xAI)",
-        shortBadge = "Grok API",
-        defaultModel = "grok-2-vision-1212",
-        requiresApiKey = true
-    ),
-    OPENROUTER(
-        displayName = "OpenRouter",
-        shortBadge = "OpenRouter",
-        defaultModel = "google/gemini-2.0-flash-exp:free",
-        requiresApiKey = true
+        requiresApiKey = false,
+        freeModels = listOf(
+            FreeModelOption("gemini-3.8-flash", "Gemini 3.8 Flash (Built-in)", true)
+        )
     )
 }
 
@@ -42,6 +71,11 @@ enum class AgentExecutionMode {
 enum class SafetyPolicyMode {
     PAYMENT_ONLY,
     STRICT_ALL
+}
+
+enum class AiRoutingStrategy(val label: String) {
+    SMART_HYBRID("Smart Round-Robin (Fast + Zero 1m Limit)"),
+    STICKY_FAILOVER("Sticky Primary + Failover")
 }
 
 enum class AgentActionType {
@@ -245,13 +279,16 @@ sealed interface AgentUiState {
 }
 
 data class AgentSettings(
-    val aiProvider: AiProvider = AiProvider.FIREBASE_AI,
+    val aiProvider: AiProvider = AiProvider.GOOGLE_AI_STUDIO,
     val googleAiStudioApiKey: String = "",
     val googleAiStudioModel: String = AiProvider.GOOGLE_AI_STUDIO.defaultModel,
-    val grokApiKey: String = "",
-    val grokModel: String = AiProvider.XAI_GROK.defaultModel,
+    val groqApiKey: String = "",
+    val groqModel: String = AiProvider.GROQ_CLOUD.defaultModel,
     val openRouterApiKey: String = "",
     val openRouterModel: String = AiProvider.OPENROUTER.defaultModel,
+    val autoCrossProviderFailover: Boolean = true,
+    val routingStrategy: AiRoutingStrategy = AiRoutingStrategy.SMART_HYBRID,
+    val smartTextFastPath: Boolean = true,
     val maxSteps: Int = 20,
     val monitorIntervalSec: Int = 30,
     val useVisionScreenshot: Boolean = true,
@@ -261,17 +298,51 @@ data class AgentSettings(
     val keepScreenAwake: Boolean = false,
     val stepDelayMs: Long = 1200L
 ) {
-    fun activeApiKey(): String = when (aiProvider) {
+    fun rawKeyBlockFor(provider: AiProvider): String = when (provider) {
         AiProvider.FIREBASE_AI -> ""
-        AiProvider.GOOGLE_AI_STUDIO -> googleAiStudioApiKey.trim()
-        AiProvider.XAI_GROK -> grokApiKey.trim()
-        AiProvider.OPENROUTER -> openRouterApiKey.trim()
+        AiProvider.GOOGLE_AI_STUDIO -> googleAiStudioApiKey
+        AiProvider.GROQ_CLOUD -> groqApiKey
+        AiProvider.OPENROUTER -> openRouterApiKey
     }
 
-    fun activeModelName(): String = when (aiProvider) {
+    fun apiKeysFor(provider: AiProvider): List<String> = parseApiKeys(rawKeyBlockFor(provider))
+
+    fun activeApiKey(): String = apiKeysFor(aiProvider).firstOrNull().orEmpty()
+
+    fun totalConfiguredKeyCount(): Int {
+        return apiKeysFor(AiProvider.GOOGLE_AI_STUDIO).size +
+            apiKeysFor(AiProvider.GROQ_CLOUD).size +
+            apiKeysFor(AiProvider.OPENROUTER).size
+    }
+
+    fun hasAnyRunnableKey(firebaseConfigured: Boolean): Boolean {
+        if (!aiProvider.requiresApiKey && firebaseConfigured) return true
+        if (apiKeysFor(aiProvider).isNotEmpty()) return true
+        if (!autoCrossProviderFailover) return false
+        return apiKeysFor(AiProvider.GOOGLE_AI_STUDIO).isNotEmpty() ||
+            apiKeysFor(AiProvider.GROQ_CLOUD).isNotEmpty() ||
+            apiKeysFor(AiProvider.OPENROUTER).isNotEmpty() ||
+            firebaseConfigured
+    }
+
+    fun modelNameFor(provider: AiProvider): String = when (provider) {
         AiProvider.FIREBASE_AI -> AiProvider.FIREBASE_AI.defaultModel
         AiProvider.GOOGLE_AI_STUDIO -> googleAiStudioModel.trim().ifBlank { AiProvider.GOOGLE_AI_STUDIO.defaultModel }
-        AiProvider.XAI_GROK -> grokModel.trim().ifBlank { AiProvider.XAI_GROK.defaultModel }
+        AiProvider.GROQ_CLOUD -> groqModel.trim().ifBlank { AiProvider.GROQ_CLOUD.defaultModel }
         AiProvider.OPENROUTER -> openRouterModel.trim().ifBlank { AiProvider.OPENROUTER.defaultModel }
+    }
+
+    fun activeModelName(): String = modelNameFor(aiProvider)
+
+    companion object {
+        fun parseApiKeys(raw: String): List<String> {
+            if (raw.isBlank()) return emptyList()
+            val seen = LinkedHashSet<String>()
+            raw.split(Regex("[\\s,;]+"))
+                .map { it.trim() }
+                .filter { it.length >= 8 }
+                .forEach { seen.add(it) }
+            return seen.toList()
+        }
     }
 }

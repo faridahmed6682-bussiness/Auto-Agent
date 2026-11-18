@@ -119,6 +119,10 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         AgentCoordinator.deletePlaybook(topicKey)
     }
 
+    fun resetKeyFailoverHealth() {
+        AgentCoordinator.resetKeyFailoverHealth()
+    }
+
     fun updateSettings(transform: (AgentSettings) -> AgentSettings) {
         AgentCoordinator.updateSettings(transform)
     }

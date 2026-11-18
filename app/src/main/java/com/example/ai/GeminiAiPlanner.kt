@@ -210,33 +210,31 @@ class GeminiAiPlanner {
                 - foulLessons: 3-5 exact fouls/mistakes to avoid (e.g. for Carrom: pocketing striker = foul & return coin; hitting opponent piece directly before yours; pocketing opponent piece accidentally)
             """.trimIndent()
 
-            val rawJson = withTimeout(INFERENCE_TIMEOUT_MS) {
-                if (settings.aiProvider == AiProvider.FIREBASE_AI) {
-                    ensureFirebaseConfigured()
-                    val response = firebaseResearchModel.generateContent(promptText)
-                    response.text.orEmpty()
-                } else {
-                    val apiKey = settings.activeApiKey()
-                    if (apiKey.isBlank()) {
-                        throw IllegalStateException("Missing API key for ${settings.aiProvider.displayName}.")
+            val attempt = withTimeout(INFERENCE_TIMEOUT_MS * 2) {
+                ApiKeyFailoverManager.executeWithFailover(
+                    settings = settings,
+                    firebaseConfigured = isFirebaseConfigured(),
+                    taskProfile = AiTaskProfile.HIGH_ACCURACY
+                ) { provider, apiKey, model ->
+                    val raw = if (provider == AiProvider.FIREBASE_AI) {
+                        firebaseResearchModel.generateContent(promptText).text.orEmpty()
+                    } else {
+                        RestAiClients.callProvider(
+                            provider = provider,
+                            apiKey = apiKey,
+                            modelName = model,
+                            systemInstruction = researchSystemPrompt,
+                            promptText = promptText,
+                            screenshot = null,
+                            schemaKind = RestSchemaKind.RESEARCH
+                        )
                     }
-                    RestAiClients.callProvider(
-                        provider = settings.aiProvider,
-                        apiKey = apiKey,
-                        modelName = settings.activeModelName(),
-                        systemInstruction = researchSystemPrompt,
-                        promptText = promptText,
-                        screenshot = null,
-                        schemaKind = RestSchemaKind.RESEARCH
-                    )
+                    if (raw.isBlank()) throw IllegalStateException("${provider.displayName} returned empty research response.")
+                    parseResearchPlaybook(raw, goal)
                 }
             }
 
-            if (rawJson.isBlank()) {
-                Result.failure(IllegalStateException("Research returned an empty response."))
-            } else {
-                Result.success(parseResearchPlaybook(rawJson, goal))
-            }
+            Result.success(attempt.value)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -272,43 +270,63 @@ class GeminiAiPlanner {
                 maxSteps = maxSteps
             )
 
-            val rawJson = withTimeout(INFERENCE_TIMEOUT_MS) {
-                if (settings.aiProvider == AiProvider.FIREBASE_AI) {
-                    ensureFirebaseConfigured()
-                    val response = firebaseModel.generateContent(
-                        content {
-                            snapshot.screenshot?.let { bitmap ->
-                                image(bitmap)
+            val interactiveNodes = snapshot.nodes.count { it.isClickable || it.isEditable }
+            val wasPreviousStepFailed = lastOutcomeHint.contains("[status=FAILED]", ignoreCase = true) ||
+                lastOutcomeHint.contains("foul", ignoreCase = true)
+            val isSparseCanvasOrGame = interactiveNodes < 5
+            val taskProfile = if (stepNumber <= 1 || isSparseCanvasOrGame || wasPreviousStepFailed) {
+                AiTaskProfile.HIGH_ACCURACY
+            } else {
+                AiTaskProfile.FAST_UI
+            }
+            val effectiveScreenshot = if (
+                settings.smartTextFastPath &&
+                taskProfile == AiTaskProfile.FAST_UI &&
+                interactiveNodes >= 5 &&
+                !wasPreviousStepFailed
+            ) {
+                // Standard UI screens (Settings, chats, feeds) with rich clickable node trees run 2-3x faster
+                // and save ~80% tokens without attaching a heavy bitmap on every intermediate step.
+                null
+            } else {
+                snapshot.screenshot
+            }
+
+            val attempt = withTimeout(INFERENCE_TIMEOUT_MS * 2) {
+                ApiKeyFailoverManager.executeWithFailover(
+                    settings = settings,
+                    firebaseConfigured = isFirebaseConfigured(),
+                    taskProfile = taskProfile
+                ) { provider, apiKey, model ->
+                    val raw = if (provider == AiProvider.FIREBASE_AI) {
+                        firebaseModel.generateContent(
+                            content {
+                                effectiveScreenshot?.let { bitmap ->
+                                    image(bitmap)
+                                }
+                                text(promptText)
                             }
-                            text(promptText)
-                        }
-                    )
-                    response.text.orEmpty()
-                } else {
-                    val apiKey = settings.activeApiKey()
-                    if (apiKey.isBlank()) {
-                        throw IllegalStateException("Missing API key for ${settings.aiProvider.displayName}. Add it in Settings.")
+                        ).text.orEmpty()
+                    } else {
+                        RestAiClients.callProvider(
+                            provider = provider,
+                            apiKey = apiKey,
+                            modelName = model,
+                            systemInstruction = systemPromptText,
+                            promptText = promptText,
+                            screenshot = effectiveScreenshot,
+                            schemaKind = RestSchemaKind.ACTION
+                        )
                     }
-                    RestAiClients.callProvider(
-                        provider = settings.aiProvider,
-                        apiKey = apiKey,
-                        modelName = settings.activeModelName(),
-                        systemInstruction = systemPromptText,
-                        promptText = promptText,
-                        screenshot = snapshot.screenshot,
-                        schemaKind = RestSchemaKind.ACTION
-                    )
+                    if (raw.isBlank()) throw IllegalStateException("${provider.displayName} returned empty action response.")
+                    parsePlannedAction(raw)
                 }
             }
 
-            if (rawJson.isBlank()) {
-                Result.failure(IllegalStateException("${settings.aiProvider.displayName} returned an empty response."))
-            } else {
-                Result.success(parsePlannedAction(rawJson))
-            }
+            Result.success(attempt.value)
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "AI planning timed out", e)
-            Result.failure(IllegalStateException("AI reasoning timed out after 60 seconds."))
+            Result.failure(IllegalStateException("AI reasoning timed out across failover keys."))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -317,15 +335,10 @@ class GeminiAiPlanner {
         }
     }
 
-    private fun ensureFirebaseConfigured() {
-        val isFirebaseReady = runCatching {
+    fun isFirebaseConfigured(): Boolean {
+        return runCatching {
             com.google.firebase.FirebaseApp.getInstance()
         }.isSuccess
-        if (!isFirebaseReady) {
-            throw IllegalStateException(
-                "Firebase is not configured in this APK. Select Google AI Studio, Grok, or OpenRouter in Settings, or add GOOGLE_SERVICES_JSON secret in GitHub."
-            )
-        }
     }
 
     internal fun parseResearchPlaybook(jsonString: String, fallbackGoal: String): TaskPlaybook {

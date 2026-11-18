@@ -49,15 +49,15 @@ object RestAiClients {
                 screenshot = screenshot,
                 schemaKind = schemaKind
             )
-            AiProvider.XAI_GROK -> callOpenAiCompatibleWithFallback(
-                endpoint = "https://api.x.ai/v1/chat/completions",
+            AiProvider.GROQ_CLOUD -> callOpenAiCompatibleWithFallback(
+                endpoint = "https://api.groq.com/openai/v1/chat/completions",
                 apiKey = apiKey,
                 modelName = modelName,
                 systemInstruction = systemInstruction,
                 promptText = promptText,
                 screenshot = screenshot,
                 extraHeaders = emptyMap(),
-                providerLabel = "Grok (xAI)",
+                providerLabel = "Groq Cloud",
                 schemaKind = schemaKind
             )
             AiProvider.OPENROUTER -> callOpenAiCompatibleWithFallback(
@@ -174,13 +174,46 @@ object RestAiClients {
                 systemInstruction = systemInstruction,
                 promptText = promptText,
                 screenshot = screenshot,
+                useJsonMode = true,
                 extraHeaders = extraHeaders,
                 providerLabel = providerLabel,
                 schemaKind = schemaKind
             )
         } catch (e: HttpStatusException) {
-            // If a text-only model rejects image_url with 400/404/422, retry with UI Node Tree only
-            if (screenshot != null && e.code in listOf(400, 404, 422)) {
+            // Retry gracefully if a free model rejects response_format or multimodal image_url
+            if (e.code in listOf(400, 422)) {
+                try {
+                    callOpenAiCompatible(
+                        endpoint = endpoint,
+                        apiKey = apiKey,
+                        modelName = modelName,
+                        systemInstruction = systemInstruction,
+                        promptText = promptText,
+                        screenshot = screenshot,
+                        useJsonMode = false,
+                        extraHeaders = extraHeaders,
+                        providerLabel = providerLabel,
+                        schemaKind = schemaKind
+                    )
+                } catch (e2: HttpStatusException) {
+                    if (screenshot != null && e2.code in listOf(400, 404, 422)) {
+                        callOpenAiCompatible(
+                            endpoint = endpoint,
+                            apiKey = apiKey,
+                            modelName = modelName,
+                            systemInstruction = systemInstruction,
+                            promptText = promptText,
+                            screenshot = null,
+                            useJsonMode = false,
+                            extraHeaders = extraHeaders,
+                            providerLabel = providerLabel,
+                            schemaKind = schemaKind
+                        )
+                    } else {
+                        throw e2
+                    }
+                }
+            } else if (screenshot != null && e.code == 404) {
                 callOpenAiCompatible(
                     endpoint = endpoint,
                     apiKey = apiKey,
@@ -188,6 +221,7 @@ object RestAiClients {
                     systemInstruction = systemInstruction,
                     promptText = promptText,
                     screenshot = null,
+                    useJsonMode = true,
                     extraHeaders = extraHeaders,
                     providerLabel = providerLabel,
                     schemaKind = schemaKind
@@ -205,6 +239,7 @@ object RestAiClients {
         systemInstruction: String,
         promptText: String,
         screenshot: Bitmap?,
+        useJsonMode: Boolean,
         extraHeaders: Map<String, String>,
         providerLabel: String,
         schemaKind: RestSchemaKind
@@ -270,7 +305,9 @@ object RestAiClients {
             put("model", modelName)
             put("temperature", 0.2)
             put("messages", messages)
-            put("response_format", JSONObject().put("type", "json_object"))
+            if (useJsonMode) {
+                put("response_format", JSONObject().put("type", "json_object"))
+            }
         }
 
         val builder = Request.Builder()

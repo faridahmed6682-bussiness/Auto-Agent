@@ -278,6 +278,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
         AgentSettingsSheet(
             settings = settings,
             onUpdate = viewModel::updateSettings,
+            onResetKeyHealth = viewModel::resetKeyFailoverHealth,
             onDismiss = { showSettingsSheet = false }
         )
     }
