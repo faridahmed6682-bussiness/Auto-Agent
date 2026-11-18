@@ -29,6 +29,7 @@ class AgentSettingsStore(private val context: Context) {
         val MAX_STEPS = intPreferencesKey("max_steps")
         val MONITOR_INTERVAL_SEC = intPreferencesKey("monitor_interval_sec")
         val USE_VISION = booleanPreferencesKey("use_vision_screenshot")
+        val AUTO_RESEARCH = booleanPreferencesKey("auto_research_before_task")
         val SAFETY_POLICY_MODE = stringPreferencesKey("safety_policy_mode")
         val GO_HOME_ON_LAUNCH = booleanPreferencesKey("go_home_on_launch")
         val KEEP_SCREEN_AWAKE = booleanPreferencesKey("keep_screen_awake")
@@ -56,6 +57,7 @@ class AgentSettingsStore(private val context: Context) {
             prefs[Keys.MAX_STEPS] = updated.maxSteps.coerceIn(5, 50)
             prefs[Keys.MONITOR_INTERVAL_SEC] = updated.monitorIntervalSec.coerceIn(10, 300)
             prefs[Keys.USE_VISION] = updated.useVisionScreenshot
+            prefs[Keys.AUTO_RESEARCH] = updated.autoResearchBeforeTask
             prefs[Keys.SAFETY_POLICY_MODE] = updated.safetyPolicyMode.name
             prefs[Keys.GO_HOME_ON_LAUNCH] = updated.goHomeOnLaunch
             prefs[Keys.KEEP_SCREEN_AWAKE] = updated.keepScreenAwake
@@ -85,6 +87,7 @@ class AgentSettingsStore(private val context: Context) {
             maxSteps = (prefs[Keys.MAX_STEPS] ?: 20).coerceIn(5, 50),
             monitorIntervalSec = (prefs[Keys.MONITOR_INTERVAL_SEC] ?: 30).coerceIn(10, 300),
             useVisionScreenshot = prefs[Keys.USE_VISION] ?: true,
+            autoResearchBeforeTask = prefs[Keys.AUTO_RESEARCH] ?: true,
             safetyPolicyMode = safetyMode,
             goHomeOnLaunch = prefs[Keys.GO_HOME_ON_LAUNCH] ?: true,
             keepScreenAwake = prefs[Keys.KEEP_SCREEN_AWAKE] ?: false,

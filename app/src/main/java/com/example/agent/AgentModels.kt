@@ -46,6 +46,8 @@ enum class SafetyPolicyMode {
 
 enum class AgentActionType {
     TAP,
+    DRAG,
+    LONG_PRESS,
     INPUT_TEXT,
     SCROLL_DOWN,
     SCROLL_UP,
@@ -117,12 +119,49 @@ data class PlannedAction(
     val targetNodeId: Int?,
     val x: Int?,
     val y: Int?,
+    val endX: Int? = null,
+    val endY: Int? = null,
+    val durationMs: Long? = null,
     val textToType: String?,
     val waitSeconds: Int?,
     val memoryNote: String?,
+    val learnedRule: String? = null,
+    val foulOrMistakeLesson: String? = null,
     val reason: String,
     val requiresConfirmation: Boolean
 )
+
+data class TaskPlaybook(
+    val topicKey: String,
+    val topicTitle: String,
+    val rulesSummary: String,
+    val winningStrategies: List<String>,
+    val foulLessons: List<String>,
+    val trainingSessions: Int = 1,
+    val lastUpdatedMs: Long = System.currentTimeMillis()
+) {
+    fun formatForPrompt(): String {
+        val strategiesText = if (winningStrategies.isEmpty()) {
+            "- None recorded yet."
+        } else {
+            winningStrategies.joinToString("\n") { "- $it" }
+        }
+        val foulsText = if (foulLessons.isEmpty()) {
+            "- None recorded yet."
+        } else {
+            foulLessons.joinToString("\n") { "- AVOID: $it" }
+        }
+        return """
+            PLAYBOOK TOPIC: $topicTitle (Trained $trainingSessions session(s))
+            CORE RULES & CONTROLS:
+            $rulesSummary
+            WINNING / POCKET / EXECUTION STRATEGIES:
+            $strategiesText
+            FOULS & MISTAKES TO AVOID:
+            $foulsText
+        """.trimIndent()
+    }
+}
 
 enum class StepStatus {
     EXECUTED,
@@ -145,6 +184,7 @@ data class AgentStepLog(
 )
 
 enum class AgentPhase(val label: String) {
+    RESEARCHING("Researching rules, controls & strategy..."),
     OBSERVING("Observing screen & UI tree..."),
     THINKING("AI reasoning next action..."),
     ACTING("Dispatching accessibility gesture..."),
@@ -215,6 +255,7 @@ data class AgentSettings(
     val maxSteps: Int = 20,
     val monitorIntervalSec: Int = 30,
     val useVisionScreenshot: Boolean = true,
+    val autoResearchBeforeTask: Boolean = true,
     val safetyPolicyMode: SafetyPolicyMode = SafetyPolicyMode.PAYMENT_ONLY,
     val goHomeOnLaunch: Boolean = true,
     val keepScreenAwake: Boolean = false,

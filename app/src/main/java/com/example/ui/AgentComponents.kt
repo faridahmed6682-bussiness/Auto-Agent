@@ -34,12 +34,16 @@ import androidx.compose.material.icons.rounded.AllInclusive
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.School
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
@@ -96,6 +100,7 @@ import com.example.agent.AgentUiState
 import com.example.agent.AiProvider
 import com.example.agent.SafetyPolicyMode
 import com.example.agent.StepStatus
+import com.example.agent.TaskPlaybook
 import com.example.ui.theme.AmberContainer
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CrimsonContainer
@@ -617,6 +622,148 @@ fun WorkingMemoryCard(memory: String) {
 }
 
 @Composable
+fun PlaybookLibraryCard(
+    playbooks: List<TaskPlaybook>,
+    onDeletePlaybook: (String) -> Unit
+) {
+    var expanded by rememberSaveable { mutableStateOf(playbooks.isNotEmpty()) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = SlateSurface),
+        border = BorderStroke(1.dp, SlateBorder),
+        shape = MaterialTheme.shapes.medium
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .minimumInteractiveComponentSize(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.School,
+                        contentDescription = null,
+                        tint = CyberTeal,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.playbook_section_title),
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "${playbooks.size} trained",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (playbooks.isEmpty()) TextSecondary else CyberTeal
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        contentDescription = null,
+                        tint = TextSecondary
+                    )
+                }
+            }
+
+            if (expanded) {
+                Spacer(modifier = Modifier.height(8.dp))
+                if (playbooks.isEmpty()) {
+                    Text(
+                        text = stringResource(R.string.playbook_empty_hint),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary
+                    )
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        playbooks.take(6).forEach { pb ->
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(SlateSurfaceElevated)
+                                    .border(1.dp, SlateBorder, RoundedCornerShape(10.dp))
+                                    .padding(12.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = pb.topicTitle,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "Trained ${pb.trainingSessions}x • ${pb.winningStrategies.size} tactics • ${pb.foulLessons.size} foul guards",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = ElectricCyan
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = { onDeletePlaybook(pb.topicKey) },
+                                        modifier = Modifier.minimumInteractiveComponentSize()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.DeleteOutline,
+                                            contentDescription = stringResource(R.string.cd_delete_playbook),
+                                            tint = TextSecondary
+                                        )
+                                    }
+                                }
+                                if (pb.rulesSummary.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = pb.rulesSummary,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = TextSecondary,
+                                        maxLines = 3,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (pb.winningStrategies.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    pb.winningStrategies.takeLast(3).forEach { tip ->
+                                        Text(
+                                            text = "+ $tip",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = CyberTeal
+                                        )
+                                    }
+                                }
+                                if (pb.foulLessons.isNotEmpty()) {
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    pb.foulLessons.takeLast(3).forEach { foul ->
+                                        Text(
+                                            text = "! Avoid: $foul",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = AmberWarning
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun SensitiveConfirmCard(
     state: AgentUiState.AwaitingConfirmation,
     onApprove: () -> Unit,
@@ -1035,6 +1182,15 @@ fun AgentSettingsSheet(
                 checked = settings.useVisionScreenshot,
                 onCheckedChange = { enabled ->
                     onUpdate { it.copy(useVisionScreenshot = enabled) }
+                }
+            )
+
+            SettingSwitchRow(
+                title = stringResource(R.string.settings_research_label),
+                subtitle = stringResource(R.string.settings_research_desc),
+                checked = settings.autoResearchBeforeTask,
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(autoResearchBeforeTask = enabled) }
                 }
             )
 

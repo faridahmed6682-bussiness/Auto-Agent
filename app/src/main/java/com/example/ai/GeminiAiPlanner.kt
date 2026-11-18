@@ -3,11 +3,13 @@ package com.example.ai
 import android.util.Log
 import com.example.agent.AgentActionType
 import com.example.agent.AgentExecutionMode
+import com.example.agent.AgentKnowledgeStore
 import com.example.agent.AgentSettings
 import com.example.agent.AgentStepLog
 import com.example.agent.AiProvider
 import com.example.agent.NotificationSignal
 import com.example.agent.PlannedAction
+import com.example.agent.TaskPlaybook
 import com.example.agent.UiSnapshot
 import com.example.service.NodeTreeParser
 import com.google.firebase.Firebase
@@ -18,6 +20,7 @@ import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 
 private const val TAG = "GeminiAiPlanner"
@@ -26,21 +29,40 @@ private const val INFERENCE_TIMEOUT_MS = 60_000L
 class GeminiAiPlanner {
 
     private val systemPromptText = """
-        You are TapPilot, an Android native AccessibilityService automation agent.
-        You observe the current Android screen via a structured UI Node Tree (with node IDs and pixel bounds [left,top,right,bottom]), an optional screenshot image, recent incoming notifications, and your running workingMemory note.
-        Your job is to select the single best next action to accomplish the user's goal.
-        Rules:
-        1. Prefer specifying targetNodeId AND its center (x, y) coordinates from the UI Node Tree whenever a matching node exists.
-        2. Use INPUT_TEXT only on editable fields, and include textToType.
-        3. If the target app or option is off-screen, use SCROLL_DOWN or SCROLL_UP, or HOME to open the launcher.
-        4. Social, search, posting, comment-reply, and Messenger chatting actions MUST have requiresConfirmation = false so they execute autonomously.
-        5. Set requiresConfirmation = true ONLY when a tap/input involves money payment, financial transfer, final checkout/place-order confirmation, card/PIN/OTP entry, or factory reset.
-        6. In CONTINUOUS_MONITOR mode:
-           - Keep workingMemory updated via memoryNote so you never repeat the same post or reply twice.
-           - When a recent incoming notification mentions a relevant chat/comment/message, switch to or open that app/notification to check and respond.
-           - When nothing new needs action right now, return WAIT with waitSeconds (e.g. 20 to 90) so the phone conserves battery/quota until the next check or notification wakeup.
-           - Only return COMPLETE if the user's end goal is completely finished, or FAIL if truly impossible.
-        7. Never repeat the exact same failing TAP/INPUT_TEXT more than twice; try BACK, SCROLL_DOWN, or HOME instead.
+        You are TapPilot, an adaptive Android native AccessibilityService automation & self-training agent.
+        You observe the Android screen via a structured UI Node Tree, a visual Screenshot image, incoming notifications, your session workingMemory, and your persistent Playbook (researched rules + winning strategies + fouls/mistakes to avoid).
+        Your job is to research/understand unfamiliar games or apps, execute the optimal next gesture, and continuously learn from the visual outcome of every previous action!
+
+        Gesture Rules:
+        1. TAP: Use targetNodeId + (x, y) center for standard UI buttons, or visual (x, y) on game canvases/boards where no UI node exists.
+        2. DRAG: Use (x, y) as start point and (endX, endY) as release point with optional durationMs (e.g. 250..1200ms).
+           - For slider controls: drag slider knob horizontally/vertically to position striker or value.
+           - For slingshot / Carrom / Pool / Golf aiming: start (x, y) at the striker/ball and drag OPPOSITE to the desired shot direction to (endX, endY) to aim and set power, then release.
+        3. LONG_PRESS: Use (x, y) with durationMs (e.g. 700..1500ms) for hold-to-charge shots or context menus.
+        4. INPUT_TEXT: Only on editable fields, with textToType.
+        5. SCROLL_DOWN / SCROLL_UP / HOME / BACK: Use for off-screen content or launching the target app/game.
+
+        Self-Training & Mistake Learning Rules:
+        6. Carefully compare the PREVIOUS ACTION and its coordinates against the CURRENT SCREENSHOT:
+           - If your previous shot/action worked well (e.g. pocketed a coin, aligned well, advanced goal), record a concise reusable takeaway in learnedRule.
+           - If your previous action caused a foul, missed pocket, hit opponent piece, or failed (e.g. striker went into pocket = foul, shot too weak/strong), record a concise lesson in foulOrMistakeLesson so you NEVER repeat that mistake.
+        7. Keep workingMemory updated via memoryNote with live board/task state (e.g. "My color: white, Queen covered, avoid top-left pocket angle").
+
+        Safety Rules:
+        8. Normal app tasks, social posting/chatting, and gameplay actions MUST have requiresConfirmation = false so they run smoothly.
+        9. Set requiresConfirmation = true ONLY for money payments, financial transfers, final checkout/place-order confirmation, card/PIN/OTP entry, or factory reset.
+        10. In CONTINUOUS_MONITOR mode, return WAIT with waitSeconds (e.g. 15..90) when idling between notifications or checks.
+        11. Never repeat the exact same failing TAP/DRAG more than twice; adjust angle/coordinates or try BACK/HOME.
+    """.trimIndent()
+
+    private val researchSystemPrompt = """
+        You are TapPilot's Pre-Task Research & Training Strategist.
+        Before the agent opens an unfamiliar game, app, or workflow on Android, research and synthesize an actionable Playbook.
+        Include:
+        1. Exact rules, scoring/win conditions, and touch controls (taps, drags, slingshot pull-back aiming opposite the pocket direction, striker slider placement, etc.).
+        2. Practical winning/pocketing/execution techniques (e.g. straight-line pocket alignment, cut shots, cover-queen rules in Carrom, or navigation flow for apps).
+        3. Specific fouls, penalties, and failure traps to avoid (e.g. striker pocketing = foul + return coin; touching opponent coin directly; double-tap or invalid checkout taps).
+        Keep every point crisp, concrete, and directly usable during live Android screen automation.
     """.trimIndent()
 
     private val actionSchema = Schema.obj(
@@ -48,6 +70,8 @@ class GeminiAiPlanner {
             "actionType" to Schema.enumeration(
                 values = listOf(
                     "TAP",
+                    "DRAG",
+                    "LONG_PRESS",
                     "INPUT_TEXT",
                     "SCROLL_DOWN",
                     "SCROLL_UP",
@@ -57,18 +81,30 @@ class GeminiAiPlanner {
                     "COMPLETE",
                     "FAIL"
                 ),
-                description = "Next automation action to perform on the Android device."
+                description = "Next automation gesture or lifecycle decision."
             ),
             "targetNodeId" to Schema.integer(
-                description = "Numeric node id from the UI Node Tree when targeting a specific element.",
+                description = "Numeric node id from UI Node Tree when targeting a clickable/editable UI node.",
                 nullable = true
             ),
             "x" to Schema.integer(
-                description = "Horizontal screen pixel coordinate for TAP when needed.",
+                description = "Horizontal screen pixel coordinate (start X for DRAG, tap X for TAP/LONG_PRESS).",
                 nullable = true
             ),
             "y" to Schema.integer(
-                description = "Vertical screen pixel coordinate for TAP when needed.",
+                description = "Vertical screen pixel coordinate (start Y for DRAG, tap Y for TAP/LONG_PRESS).",
+                nullable = true
+            ),
+            "endX" to Schema.integer(
+                description = "Ending horizontal screen pixel coordinate when actionType is DRAG.",
+                nullable = true
+            ),
+            "endY" to Schema.integer(
+                description = "Ending vertical screen pixel coordinate when actionType is DRAG.",
+                nullable = true
+            ),
+            "durationMs" to Schema.integer(
+                description = "Gesture duration in milliseconds for DRAG (150..2000) or LONG_PRESS (500..2500).",
                 nullable = true
             ),
             "textToType" to Schema.string(
@@ -76,27 +112,69 @@ class GeminiAiPlanner {
                 nullable = true
             ),
             "waitSeconds" to Schema.integer(
-                description = "Seconds to wait before next check when actionType is WAIT (e.g., 15 to 120 in monitor mode).",
+                description = "Seconds to wait before next check when actionType is WAIT.",
                 nullable = true
             ),
             "memoryNote" to Schema.string(
-                description = "Concise updated working-memory summary of progress, posted items, replies handled, or prices found.",
+                description = "Updated short-term working memory of current progress/match state.",
+                nullable = true
+            ),
+            "learnedRule" to Schema.string(
+                description = "New winning strategy or effective shot/control technique discovered from the previous step's result.",
+                nullable = true
+            ),
+            "foulOrMistakeLesson" to Schema.string(
+                description = "New foul rule, miss reason, or mistake observed after the previous action that should be avoided forever.",
                 nullable = true
             ),
             "reason" to Schema.string(
-                description = "Concise explanation of why this step advances the user's goal."
+                description = "Concise explanation of why this action advances the goal."
             ),
             "requiresConfirmation" to Schema.boolean(
-                description = "True ONLY for payments, money transfer, final order/checkout confirmation, card/PIN/OTP entry, or destructive resets. Keep false for normal posting, commenting, chatting, or browsing."
+                description = "True ONLY for payments, transfers, final checkout, card/PIN/OTP, or factory reset."
             )
         ),
-        optionalProperties = listOf("targetNodeId", "x", "y", "textToType", "waitSeconds", "memoryNote")
+        optionalProperties = listOf(
+            "targetNodeId",
+            "x",
+            "y",
+            "endX",
+            "endY",
+            "durationMs",
+            "textToType",
+            "waitSeconds",
+            "memoryNote",
+            "learnedRule",
+            "foulOrMistakeLesson"
+        )
+    )
+
+    private val researchSchema = Schema.obj(
+        properties = mapOf(
+            "topicKey" to Schema.string(description = "Short snake_case key e.g. carrom_board_game or facebook_marketplace"),
+            "topicTitle" to Schema.string(description = "Readable title of the game, app, or skill."),
+            "rulesSummary" to Schema.string(description = "Concise summary of rules, controls, and objective."),
+            "winningStrategies" to Schema.array(
+                items = Schema.string(),
+                description = "3 to 5 concrete winning/pocketing/execution techniques."
+            ),
+            "foulLessons" to Schema.array(
+                items = Schema.string(),
+                description = "3 to 5 concrete foul rules, penalties, or common mistakes to avoid."
+            )
+        )
     )
 
     private val config = generationConfig {
         responseMimeType = "application/json"
         responseSchema = actionSchema
         temperature = 0.2f
+    }
+
+    private val researchConfig = generationConfig {
+        responseMimeType = "application/json"
+        responseSchema = researchSchema
+        temperature = 0.25f
     }
 
     private val firebaseModel by lazy {
@@ -107,6 +185,66 @@ class GeminiAiPlanner {
         )
     }
 
+    private val firebaseResearchModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = researchConfig,
+            systemInstruction = content { text(researchSystemPrompt) }
+        )
+    }
+
+    suspend fun researchTaskPlaybook(
+        goal: String,
+        settings: AgentSettings
+    ): Result<TaskPlaybook> {
+        return try {
+            val promptText = """
+                USER TASK / GAME GOAL: $goal
+
+                Research this game, app, or workflow thoroughly before the agent touches the screen.
+                Return:
+                - topicKey: concise snake_case identifier
+                - topicTitle: clear name
+                - rulesSummary: how the game/app works, touch gestures needed (TAP vs DRAG aim-and-release vs slider), and scoring/win condition
+                - winningStrategies: 3-5 practical strategies (e.g. for Carrom: how to position striker on baseline, aim straight through center of target coin toward pocket, pull opposite to target vector, cover Queen immediately)
+                - foulLessons: 3-5 exact fouls/mistakes to avoid (e.g. for Carrom: pocketing striker = foul & return coin; hitting opponent piece directly before yours; pocketing opponent piece accidentally)
+            """.trimIndent()
+
+            val rawJson = withTimeout(INFERENCE_TIMEOUT_MS) {
+                if (settings.aiProvider == AiProvider.FIREBASE_AI) {
+                    ensureFirebaseConfigured()
+                    val response = firebaseResearchModel.generateContent(promptText)
+                    response.text.orEmpty()
+                } else {
+                    val apiKey = settings.activeApiKey()
+                    if (apiKey.isBlank()) {
+                        throw IllegalStateException("Missing API key for ${settings.aiProvider.displayName}.")
+                    }
+                    RestAiClients.callProvider(
+                        provider = settings.aiProvider,
+                        apiKey = apiKey,
+                        modelName = settings.activeModelName(),
+                        systemInstruction = researchSystemPrompt,
+                        promptText = promptText,
+                        screenshot = null,
+                        schemaKind = RestSchemaKind.RESEARCH
+                    )
+                }
+            }
+
+            if (rawJson.isBlank()) {
+                Result.failure(IllegalStateException("Research returned an empty response."))
+            } else {
+                Result.success(parseResearchPlaybook(rawJson, goal))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Pre-task research failed", e)
+            Result.failure(e)
+        }
+    }
+
     suspend fun planNextAction(
         goal: String,
         mode: AgentExecutionMode,
@@ -115,6 +253,8 @@ class GeminiAiPlanner {
         recentHistory: List<AgentStepLog>,
         recentNotifications: List<NotificationSignal>,
         workingMemory: String,
+        playbook: TaskPlaybook?,
+        lastOutcomeHint: String,
         stepNumber: Int,
         maxSteps: Int?
     ): Result<PlannedAction> {
@@ -126,20 +266,15 @@ class GeminiAiPlanner {
                 recentHistory = recentHistory,
                 recentNotifications = recentNotifications,
                 workingMemory = workingMemory,
+                playbook = playbook,
+                lastOutcomeHint = lastOutcomeHint,
                 stepNumber = stepNumber,
                 maxSteps = maxSteps
             )
 
             val rawJson = withTimeout(INFERENCE_TIMEOUT_MS) {
                 if (settings.aiProvider == AiProvider.FIREBASE_AI) {
-                    val isFirebaseReady = runCatching {
-                        com.google.firebase.FirebaseApp.getInstance()
-                    }.isSuccess
-                    if (!isFirebaseReady) {
-                        throw IllegalStateException(
-                            "Firebase is not configured in this APK. Select Google AI Studio, Grok, or OpenRouter in Settings, or add GOOGLE_SERVICES_JSON secret in GitHub."
-                        )
-                    }
+                    ensureFirebaseConfigured()
                     val response = firebaseModel.generateContent(
                         content {
                             snapshot.screenshot?.let { bitmap ->
@@ -160,7 +295,8 @@ class GeminiAiPlanner {
                         modelName = settings.activeModelName(),
                         systemInstruction = systemPromptText,
                         promptText = promptText,
-                        screenshot = snapshot.screenshot
+                        screenshot = snapshot.screenshot,
+                        schemaKind = RestSchemaKind.ACTION
                     )
                 }
             }
@@ -181,39 +317,61 @@ class GeminiAiPlanner {
         }
     }
 
+    private fun ensureFirebaseConfigured() {
+        val isFirebaseReady = runCatching {
+            com.google.firebase.FirebaseApp.getInstance()
+        }.isSuccess
+        if (!isFirebaseReady) {
+            throw IllegalStateException(
+                "Firebase is not configured in this APK. Select Google AI Studio, Grok, or OpenRouter in Settings, or add GOOGLE_SERVICES_JSON secret in GitHub."
+            )
+        }
+    }
+
+    internal fun parseResearchPlaybook(jsonString: String, fallbackGoal: String): TaskPlaybook {
+        val clean = RestAiClients.extractJsonObjectString(jsonString)
+        val json = JSONObject(clean)
+        val rawTitle = json.optString("topicTitle").trim().ifBlank {
+            fallbackGoal.take(44).ifBlank { "Task Playbook" }
+        }
+        val rawKey = json.optString("topicKey").trim().ifBlank { rawTitle }
+        val rules = json.optString("rulesSummary").trim()
+        val strategies = jsonArrayToStrings(json.optJSONArray("winningStrategies"))
+        val fouls = jsonArrayToStrings(json.optJSONArray("foulLessons"))
+
+        return TaskPlaybook(
+            topicKey = AgentKnowledgeStore.normalizeKey(rawKey),
+            topicTitle = rawTitle,
+            rulesSummary = rules,
+            winningStrategies = strategies,
+            foulLessons = fouls,
+            trainingSessions = 1,
+            lastUpdatedMs = System.currentTimeMillis()
+        )
+    }
+
     internal fun parsePlannedAction(jsonString: String): PlannedAction {
-        val json = JSONObject(jsonString)
+        val json = JSONObject(RestAiClients.extractJsonObjectString(jsonString))
         val actionType = AgentActionType.fromWire(json.getString("actionType"))
-        val targetNodeId = if (json.has("targetNodeId") && !json.isNull("targetNodeId")) {
-            json.optInt("targetNodeId", -1).takeIf { it > 0 }
+        val targetNodeId = optPositiveInt(json, "targetNodeId")
+        val x = optNonNegativeInt(json, "x")
+        val y = optNonNegativeInt(json, "y")
+        val endX = optNonNegativeInt(json, "endX")
+        val endY = optNonNegativeInt(json, "endY")
+        val durationMs = if (json.has("durationMs") && !json.isNull("durationMs")) {
+            json.optLong("durationMs", -1L).takeIf { it > 0L }?.coerceIn(120L, 3000L)
         } else {
             null
         }
-        val x = if (json.has("x") && !json.isNull("x")) {
-            json.optInt("x", -1).takeIf { it >= 0 }
-        } else {
-            null
-        }
-        val y = if (json.has("y") && !json.isNull("y")) {
-            json.optInt("y", -1).takeIf { it >= 0 }
-        } else {
-            null
-        }
-        val textToType = if (json.has("textToType") && !json.isNull("textToType")) {
-            json.optString("textToType").takeIf { it.isNotEmpty() && it != "null" }
-        } else {
-            null
-        }
+        val textToType = optCleanString(json, "textToType")
         val waitSeconds = if (json.has("waitSeconds") && !json.isNull("waitSeconds")) {
             json.optInt("waitSeconds", -1).takeIf { it > 0 }?.coerceIn(3, 300)
         } else {
             null
         }
-        val memoryNote = if (json.has("memoryNote") && !json.isNull("memoryNote")) {
-            json.optString("memoryNote").trim().takeIf { it.isNotEmpty() && it != "null" }
-        } else {
-            null
-        }
+        val memoryNote = optCleanString(json, "memoryNote")
+        val learnedRule = optCleanString(json, "learnedRule")
+        val foulOrMistakeLesson = optCleanString(json, "foulOrMistakeLesson")
         val reason = json.optString("reason", "Proceeding with goal.")
         val requiresConfirmation = json.optBoolean("requiresConfirmation", false)
 
@@ -222,12 +380,51 @@ class GeminiAiPlanner {
             targetNodeId = targetNodeId,
             x = x,
             y = y,
+            endX = endX,
+            endY = endY,
+            durationMs = durationMs,
             textToType = textToType,
             waitSeconds = waitSeconds,
             memoryNote = memoryNote,
+            learnedRule = learnedRule,
+            foulOrMistakeLesson = foulOrMistakeLesson,
             reason = reason,
             requiresConfirmation = requiresConfirmation
         )
+    }
+
+    private fun optPositiveInt(json: JSONObject, key: String): Int? {
+        return if (json.has(key) && !json.isNull(key)) {
+            json.optInt(key, -1).takeIf { it > 0 }
+        } else {
+            null
+        }
+    }
+
+    private fun optNonNegativeInt(json: JSONObject, key: String): Int? {
+        return if (json.has(key) && !json.isNull(key)) {
+            json.optInt(key, -1).takeIf { it >= 0 }
+        } else {
+            null
+        }
+    }
+
+    private fun optCleanString(json: JSONObject, key: String): String? {
+        return if (json.has(key) && !json.isNull(key)) {
+            json.optString(key).trim().takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+        } else {
+            null
+        }
+    }
+
+    private fun jsonArrayToStrings(array: JSONArray?): List<String> {
+        if (array == null) return emptyList()
+        val out = mutableListOf<String>()
+        for (i in 0 until array.length()) {
+            val item = array.optString(i).trim()
+            if (item.isNotBlank()) out.add(item)
+        }
+        return out
     }
 
     private fun buildPrompt(
@@ -237,6 +434,8 @@ class GeminiAiPlanner {
         recentHistory: List<AgentStepLog>,
         recentNotifications: List<NotificationSignal>,
         workingMemory: String,
+        playbook: TaskPlaybook?,
+        lastOutcomeHint: String,
         stepNumber: Int,
         maxSteps: Int?
     ): String {
@@ -258,6 +457,8 @@ class GeminiAiPlanner {
 
         val stepLabel = if (maxSteps != null) "$stepNumber of $maxSteps" else "$stepNumber (Continuous Monitor)"
         val memoryBlock = workingMemory.ifBlank { "No prior working memory yet." }
+        val playbookBlock = playbook?.formatForPrompt() ?: "No persistent playbook saved yet."
+        val outcomeBlock = lastOutcomeHint.ifBlank { "First observation — no prior gesture result yet." }
         val nodeTreeText = NodeTreeParser.formatNodesForPrompt(snapshot.nodes)
 
         return """
@@ -267,6 +468,12 @@ class GeminiAiPlanner {
             FOREGROUND PACKAGE: ${snapshot.packageName}
             SCREEN RESOLUTION: ${snapshot.screenWidth}x${snapshot.screenHeight}
             CAPTURE STATUS: ${snapshot.captureNote}
+
+            PERSISTENT PLAYBOOK (RESEARCHED & LEARNED ACROSS SESSIONS):
+            $playbookBlock
+
+            PREVIOUS ACTION RESULT TO EVALUATE:
+            $outcomeBlock
 
             WORKING MEMORY:
             $memoryBlock

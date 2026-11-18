@@ -68,6 +68,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     val goalText by viewModel.goalText.collectAsStateWithLifecycle()
     val executionMode by viewModel.executionMode.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val playbooks by viewModel.playbooks.collectAsStateWithLifecycle()
 
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
 
@@ -213,6 +214,13 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                     item {
                         WorkingMemoryCard(memory = workingMemory)
                     }
+                }
+
+                item {
+                    PlaybookLibraryCard(
+                        playbooks = playbooks,
+                        onDeletePlaybook = viewModel::deletePlaybook
+                    )
                 }
 
                 item {

@@ -14,6 +14,11 @@ import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 
+enum class RestSchemaKind {
+    ACTION,
+    RESEARCH
+}
+
 object RestAiClients {
 
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -32,7 +37,8 @@ object RestAiClients {
         modelName: String,
         systemInstruction: String,
         promptText: String,
-        screenshot: Bitmap?
+        screenshot: Bitmap?,
+        schemaKind: RestSchemaKind = RestSchemaKind.ACTION
     ): String {
         return when (provider) {
             AiProvider.GOOGLE_AI_STUDIO -> callGoogleAiStudio(
@@ -40,7 +46,8 @@ object RestAiClients {
                 modelName = modelName,
                 systemInstruction = systemInstruction,
                 promptText = promptText,
-                screenshot = screenshot
+                screenshot = screenshot,
+                schemaKind = schemaKind
             )
             AiProvider.XAI_GROK -> callOpenAiCompatibleWithFallback(
                 endpoint = "https://api.x.ai/v1/chat/completions",
@@ -50,7 +57,8 @@ object RestAiClients {
                 promptText = promptText,
                 screenshot = screenshot,
                 extraHeaders = emptyMap(),
-                providerLabel = "Grok (xAI)"
+                providerLabel = "Grok (xAI)",
+                schemaKind = schemaKind
             )
             AiProvider.OPENROUTER -> callOpenAiCompatibleWithFallback(
                 endpoint = "https://openrouter.ai/api/v1/chat/completions",
@@ -63,7 +71,8 @@ object RestAiClients {
                     "HTTP-Referer" to "https://github.com/tappilot-agent",
                     "X-Title" to "TapPilot Agent"
                 ),
-                providerLabel = "OpenRouter"
+                providerLabel = "OpenRouter",
+                schemaKind = schemaKind
             )
             AiProvider.FIREBASE_AI -> throw IllegalStateException("FIREBASE_AI uses Firebase SDK directly.")
         }
@@ -74,7 +83,8 @@ object RestAiClients {
         modelName: String,
         systemInstruction: String,
         promptText: String,
-        screenshot: Bitmap?
+        screenshot: Bitmap?,
+        schemaKind: RestSchemaKind
     ): String {
         val cleanModel = modelName.removePrefix("models/").trim()
         val encodedModel = URLEncoder.encode(cleanModel, "UTF-8")
@@ -92,6 +102,11 @@ object RestAiClients {
                 )
             }
             put(JSONObject().put("text", promptText))
+        }
+
+        val responseSchema = when (schemaKind) {
+            RestSchemaKind.ACTION -> buildGoogleRestActionSchema()
+            RestSchemaKind.RESEARCH -> buildGoogleRestResearchSchema()
         }
 
         val bodyJson = JSONObject().apply {
@@ -112,7 +127,7 @@ object RestAiClients {
                 JSONObject()
                     .put("temperature", 0.2)
                     .put("responseMimeType", "application/json")
-                    .put("responseSchema", buildGoogleRestActionSchema())
+                    .put("responseSchema", responseSchema)
             )
         }
 
@@ -148,7 +163,8 @@ object RestAiClients {
         promptText: String,
         screenshot: Bitmap?,
         extraHeaders: Map<String, String>,
-        providerLabel: String
+        providerLabel: String,
+        schemaKind: RestSchemaKind
     ): String {
         return try {
             callOpenAiCompatible(
@@ -159,7 +175,8 @@ object RestAiClients {
                 promptText = promptText,
                 screenshot = screenshot,
                 extraHeaders = extraHeaders,
-                providerLabel = providerLabel
+                providerLabel = providerLabel,
+                schemaKind = schemaKind
             )
         } catch (e: HttpStatusException) {
             // If a text-only model rejects image_url with 400/404/422, retry with UI Node Tree only
@@ -172,7 +189,8 @@ object RestAiClients {
                     promptText = promptText,
                     screenshot = null,
                     extraHeaders = extraHeaders,
-                    providerLabel = providerLabel
+                    providerLabel = providerLabel,
+                    schemaKind = schemaKind
                 )
             } else {
                 throw e
@@ -188,24 +206,45 @@ object RestAiClients {
         promptText: String,
         screenshot: Bitmap?,
         extraHeaders: Map<String, String>,
-        providerLabel: String
+        providerLabel: String,
+        schemaKind: RestSchemaKind
     ): String {
+        val contractBody = when (schemaKind) {
+            RestSchemaKind.ACTION -> """
+                {
+                  "actionType": "TAP" | "DRAG" | "LONG_PRESS" | "INPUT_TEXT" | "SCROLL_DOWN" | "SCROLL_UP" | "BACK" | "HOME" | "WAIT" | "COMPLETE" | "FAIL",
+                  "targetNodeId": integer or null,
+                  "x": integer or null,
+                  "y": integer or null,
+                  "endX": integer or null,
+                  "endY": integer or null,
+                  "durationMs": integer or null,
+                  "textToType": string or null,
+                  "waitSeconds": integer or null,
+                  "memoryNote": string or null,
+                  "learnedRule": string or null,
+                  "foulOrMistakeLesson": string or null,
+                  "reason": string,
+                  "requiresConfirmation": boolean
+                }
+            """.trimIndent()
+            RestSchemaKind.RESEARCH -> """
+                {
+                  "topicKey": string,
+                  "topicTitle": string,
+                  "rulesSummary": string,
+                  "winningStrategies": [string],
+                  "foulLessons": [string]
+                }
+            """.trimIndent()
+        }
+
         val jsonContractInstruction = """
             $systemInstruction
 
             CRITICAL OUTPUT FORMAT:
             Respond with ONLY a single valid JSON object (no markdown fences) matching this exact structure:
-            {
-              "actionType": "TAP" | "INPUT_TEXT" | "SCROLL_DOWN" | "SCROLL_UP" | "BACK" | "HOME" | "WAIT" | "COMPLETE" | "FAIL",
-              "targetNodeId": integer or null,
-              "x": integer or null,
-              "y": integer or null,
-              "textToType": string or null,
-              "waitSeconds": integer or null,
-              "memoryNote": string or null,
-              "reason": string,
-              "requiresConfirmation": boolean
-            }
+            $contractBody
         """.trimIndent()
 
         val userMessage = JSONObject().put("role", "user")
@@ -295,16 +334,33 @@ object RestAiClients {
 
     private fun buildGoogleRestActionSchema(): JSONObject {
         val actionEnum = JSONArray(
-            listOf("TAP", "INPUT_TEXT", "SCROLL_DOWN", "SCROLL_UP", "BACK", "HOME", "WAIT", "COMPLETE", "FAIL")
+            listOf(
+                "TAP",
+                "DRAG",
+                "LONG_PRESS",
+                "INPUT_TEXT",
+                "SCROLL_DOWN",
+                "SCROLL_UP",
+                "BACK",
+                "HOME",
+                "WAIT",
+                "COMPLETE",
+                "FAIL"
+            )
         )
         val props = JSONObject()
             .put("actionType", JSONObject().put("type", "STRING").put("enum", actionEnum))
             .put("targetNodeId", JSONObject().put("type", "INTEGER").put("nullable", true))
             .put("x", JSONObject().put("type", "INTEGER").put("nullable", true))
             .put("y", JSONObject().put("type", "INTEGER").put("nullable", true))
+            .put("endX", JSONObject().put("type", "INTEGER").put("nullable", true))
+            .put("endY", JSONObject().put("type", "INTEGER").put("nullable", true))
+            .put("durationMs", JSONObject().put("type", "INTEGER").put("nullable", true))
             .put("textToType", JSONObject().put("type", "STRING").put("nullable", true))
             .put("waitSeconds", JSONObject().put("type", "INTEGER").put("nullable", true))
             .put("memoryNote", JSONObject().put("type", "STRING").put("nullable", true))
+            .put("learnedRule", JSONObject().put("type", "STRING").put("nullable", true))
+            .put("foulOrMistakeLesson", JSONObject().put("type", "STRING").put("nullable", true))
             .put("reason", JSONObject().put("type", "STRING"))
             .put("requiresConfirmation", JSONObject().put("type", "BOOLEAN"))
 
@@ -312,6 +368,23 @@ object RestAiClients {
             .put("type", "OBJECT")
             .put("properties", props)
             .put("required", JSONArray(listOf("actionType", "reason", "requiresConfirmation")))
+    }
+
+    private fun buildGoogleRestResearchSchema(): JSONObject {
+        val stringArray = JSONObject()
+            .put("type", "ARRAY")
+            .put("items", JSONObject().put("type", "STRING"))
+        val props = JSONObject()
+            .put("topicKey", JSONObject().put("type", "STRING"))
+            .put("topicTitle", JSONObject().put("type", "STRING"))
+            .put("rulesSummary", JSONObject().put("type", "STRING"))
+            .put("winningStrategies", stringArray)
+            .put("foulLessons", stringArray)
+
+        return JSONObject()
+            .put("type", "OBJECT")
+            .put("properties", props)
+            .put("required", JSONArray(listOf("topicKey", "topicTitle", "rulesSummary", "winningStrategies", "foulLessons")))
     }
 
     private class HttpStatusException(val code: Int, message: String) : IOException(message)

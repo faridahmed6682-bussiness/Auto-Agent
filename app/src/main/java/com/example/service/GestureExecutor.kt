@@ -59,6 +59,46 @@ object GestureExecutor {
                 }
             }
 
+            AgentActionType.DRAG -> {
+                val startX = (action.x ?: targetNode?.bounds?.centerX)?.coerceIn(1, screenWidth - 1)
+                val startY = (action.y ?: targetNode?.bounds?.centerY)?.coerceIn(1, screenHeight - 1)
+                val endX = action.endX?.coerceIn(1, screenWidth - 1)
+                val endY = action.endY?.coerceIn(1, screenHeight - 1)
+
+                if (startX == null || startY == null || endX == null || endY == null) {
+                    return ExecutionResult(false, "DRAG requires start (x,y) and target (endX,endY) coordinates.")
+                }
+                val duration = (action.durationMs ?: 450L).coerceIn(120L, 2500L)
+                val ok = dispatchSwipe(
+                    service = service,
+                    startX = startX.toFloat(),
+                    startY = startY.toFloat(),
+                    endX = endX.toFloat(),
+                    endY = endY.toFloat(),
+                    durationMs = duration
+                )
+                ExecutionResult(
+                    ok,
+                    if (ok) "Dragged ($startX,$startY) -> ($endX,$endY) [${duration}ms]"
+                    else "Drag rejected ($startX,$startY) -> ($endX,$endY)"
+                )
+            }
+
+            AgentActionType.LONG_PRESS -> {
+                val tapX = (action.x ?: targetNode?.bounds?.centerX)?.coerceIn(1, screenWidth - 1)
+                val tapY = (action.y ?: targetNode?.bounds?.centerY)?.coerceIn(1, screenHeight - 1)
+                if (tapX == null || tapY == null) {
+                    return ExecutionResult(false, "LONG_PRESS requires coordinates or node bounds.")
+                }
+                val duration = (action.durationMs ?: 700L).coerceIn(300L, 3000L)
+                val ok = dispatchTap(service, tapX.toFloat(), tapY.toFloat(), durationMs = duration)
+                ExecutionResult(
+                    ok,
+                    if (ok) "Long-pressed ($tapX, $tapY) [${duration}ms]"
+                    else "Long-press rejected at ($tapX, $tapY)"
+                )
+            }
+
             AgentActionType.INPUT_TEXT -> {
                 val text = action.textToType.orEmpty()
                 if (text.isBlank()) {
@@ -125,9 +165,14 @@ object GestureExecutor {
         }
     }
 
-    private suspend fun dispatchTap(service: AccessibilityService, x: Float, y: Float): Boolean {
+    private suspend fun dispatchTap(
+        service: AccessibilityService,
+        x: Float,
+        y: Float,
+        durationMs: Long = 65L
+    ): Boolean {
         val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, 65L)
+        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchAndAwait(service, gesture)
     }
@@ -137,13 +182,14 @@ object GestureExecutor {
         startX: Float,
         startY: Float,
         endX: Float,
-        endY: Float
+        endY: Float,
+        durationMs: Long = 380L
     ): Boolean {
         val path = Path().apply {
             moveTo(startX, startY)
             lineTo(endX, endY)
         }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, 380L)
+        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         return dispatchAndAwait(service, gesture)
     }

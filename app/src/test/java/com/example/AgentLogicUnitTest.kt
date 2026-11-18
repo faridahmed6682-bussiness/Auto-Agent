@@ -161,4 +161,26 @@ class AgentLogicUnitTest {
         assertEquals("or_key_123", settings.activeApiKey())
         assertEquals("meta-llama/llama-4-maverick:free", settings.activeModelName())
     }
+
+    @Test
+    fun `knowledge store matches saved carrom playbook by goal and merges lessons without duplicates`() {
+        val carrom = com.example.agent.TaskPlaybook(
+            topicKey = "carrom_board_game",
+            topicTitle = "Carrom Board Game",
+            rulesSummary = "Drag striker opposite target direction.",
+            winningStrategies = listOf("Cut shots at 30 degrees work well for corner pockets."),
+            foulLessons = listOf("Pocketing striker causes a foul.")
+        )
+        val matched = com.example.agent.AgentKnowledgeStore.findBestMatchingPlaybook(
+            listOf(carrom),
+            "Open Carrom Board and practice pocketing coins"
+        )
+        assertEquals("carrom_board_game", matched?.topicKey)
+
+        val merged = com.example.agent.AgentKnowledgeStore.mergeLessons(
+            carrom.foulLessons,
+            listOf("pocketing striker causes a foul.", "Avoid hitting opponent black coin first.")
+        )
+        assertEquals(2, merged.size)
+    }
 }

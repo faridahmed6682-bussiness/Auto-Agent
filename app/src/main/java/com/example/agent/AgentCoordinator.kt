@@ -30,7 +30,9 @@ object AgentCoordinator {
 
     private var appContext: Context? = null
     private var settingsStore: AgentSettingsStore? = null
+    private var knowledgeStore: AgentKnowledgeStore? = null
     private var settingsCollectJob: Job? = null
+    private var playbooksCollectJob: Job? = null
     private val aiPlanner = GeminiAiPlanner()
 
     private var serviceRef: WeakReference<TapPilotAccessibilityService>? = null
@@ -47,6 +49,9 @@ object AgentCoordinator {
     private val _settings = MutableStateFlow(AgentSettings())
     val settings: StateFlow<AgentSettings> = _settings.asStateFlow()
 
+    private val _playbooks = MutableStateFlow<List<TaskPlaybook>>(emptyList())
+    val playbooks: StateFlow<List<TaskPlaybook>> = _playbooks.asStateFlow()
+
     private val _uiState = MutableStateFlow<AgentUiState>(AgentUiState.Idle)
     val uiState: StateFlow<AgentUiState> = _uiState.asStateFlow()
 
@@ -60,6 +65,16 @@ object AgentCoordinator {
             store.settingsFlow.collect { latest ->
                 _settings.value = latest
             }
+        }
+        val kStore = AgentKnowledgeStore(app)
+        knowledgeStore = kStore
+        playbooksCollectJob = scope.launch {
+            kStore.playbooks.collect { list ->
+                _playbooks.value = list
+            }
+        }
+        scope.launch {
+            kStore.loadInitial()
         }
     }
 
@@ -92,6 +107,13 @@ object AgentCoordinator {
         val store = settingsStore ?: return
         scope.launch {
             store.updateSettings(transform)
+        }
+    }
+
+    fun deletePlaybook(topicKey: String) {
+        val store = knowledgeStore ?: return
+        scope.launch {
+            store.deletePlaybook(topicKey)
         }
     }
 
@@ -154,6 +176,46 @@ object AgentCoordinator {
 
         activeRunJob = scope.launch {
             try {
+                var activePlaybook = knowledgeStore?.findMatchingPlaybook(goal)
+                var lastOutcomeHint = ""
+
+                if (activePlaybook == null && initialSettings.autoResearchBeforeTask) {
+                    _uiState.value = AgentUiState.Running(
+                        goal = goal,
+                        mode = mode,
+                        currentStep = 0,
+                        maxSteps = maxStepsLimit,
+                        phase = AgentPhase.RESEARCHING,
+                        lastThought = "Unfamiliar task — researching rules, controls, winning shots & fouls first...",
+                        workingMemory = workingMemory,
+                        trace = trace.toList()
+                    )
+                    val researched = withContext(Dispatchers.IO) {
+                        aiPlanner.researchTaskPlaybook(goal, initialSettings)
+                    }.getOrNull()
+
+                    if (researched != null) {
+                        activePlaybook = knowledgeStore?.saveOrMergePlaybook(researched) ?: researched
+                        workingMemory = "Researched [${activePlaybook.topicTitle}]: ${activePlaybook.rulesSummary.take(160)}"
+                        appendTrace(
+                            trace,
+                            AgentStepLog(
+                                stepNumber = 0,
+                                timestampMs = System.currentTimeMillis(),
+                                actionType = AgentActionType.WAIT,
+                                targetSummary = "Playbook: ${activePlaybook.topicTitle}",
+                                reason = "Researched ${activePlaybook.winningStrategies.size} strategies & ${activePlaybook.foulLessons.size} foul guards.",
+                                status = StepStatus.COMPLETED,
+                                requiresConfirmation = false
+                            )
+                        )
+                    }
+                } else if (activePlaybook != null) {
+                    knowledgeStore?.incrementTrainingSession(activePlaybook.topicKey)
+                    activePlaybook = knowledgeStore?.findMatchingPlaybook(goal) ?: activePlaybook
+                    workingMemory = "Loaded trained playbook [${activePlaybook.topicTitle}] (${activePlaybook.winningStrategies.size} tactics, ${activePlaybook.foulLessons.size} foul guards)."
+                }
+
                 if (initialSettings.goHomeOnLaunch) {
                     _uiState.value = AgentUiState.Running(
                         goal = goal,
@@ -227,6 +289,8 @@ object AgentCoordinator {
                                 recentHistory = trace,
                                 recentNotifications = notificationsSnapshot,
                                 workingMemory = workingMemory,
+                                playbook = activePlaybook,
+                                lastOutcomeHint = lastOutcomeHint,
                                 stepNumber = step,
                                 maxSteps = maxStepsLimit
                             )
@@ -275,6 +339,20 @@ object AgentCoordinator {
 
                     if (!plannedAction.memoryNote.isNullOrBlank()) {
                         workingMemory = plannedAction.memoryNote
+                    }
+
+                    if (!plannedAction.learnedRule.isNullOrBlank() || !plannedAction.foulOrMistakeLesson.isNullOrBlank()) {
+                        val topicKey = activePlaybook?.topicKey
+                            ?: AgentKnowledgeStore.normalizeKey(goal.take(40))
+                        val updatedPlaybook = knowledgeStore?.recordStepLearning(
+                            topicKey = topicKey,
+                            fallbackTopicTitle = activePlaybook?.topicTitle ?: goal.take(40),
+                            newStrategy = plannedAction.learnedRule,
+                            newFoulLesson = plannedAction.foulOrMistakeLesson
+                        )
+                        if (updatedPlaybook != null) {
+                            activePlaybook = updatedPlaybook
+                        }
                     }
 
                     val targetNode = plannedAction.targetNodeId?.let { id ->
@@ -432,13 +510,17 @@ object AgentCoordinator {
                     )
 
                     val execResult = service.executeAction(plannedAction, snapshot)
+                    val stepResultSummary = execResult.summary.ifBlank { targetSummary }
+                    lastOutcomeHint = "Previous step executed ${plannedAction.actionType.name}: $stepResultSummary " +
+                        "[status=${if (execResult.success) finalStatus.name else "FAILED"}]. " +
+                        "Reason was: ${plannedAction.reason}. Compare the new screenshot carefully: if it succeeded/pocketed, save learnedRule; if foul/missed/wrong, save foulOrMistakeLesson."
                     appendTrace(
                         trace,
                         AgentStepLog(
                             stepNumber = step,
                             timestampMs = System.currentTimeMillis(),
                             actionType = plannedAction.actionType,
-                            targetSummary = execResult.summary.ifBlank { targetSummary },
+                            targetSummary = stepResultSummary,
                             reason = plannedAction.reason,
                             status = if (execResult.success) finalStatus else StepStatus.FAILED,
                             requiresConfirmation = safetyCheck.needsConfirmation
@@ -612,6 +694,10 @@ object AgentCoordinator {
 
     private fun buildTargetSummary(action: PlannedAction, node: ScreenNode?): String {
         return when {
+            action.actionType == AgentActionType.DRAG &&
+                action.x != null && action.y != null &&
+                action.endX != null && action.endY != null ->
+                "Drag (${action.x},${action.y}) -> (${action.endX},${action.endY})"
             node != null -> "#${node.id} ${node.displayLabel()} (${node.bounds.centerX},${node.bounds.centerY})"
             action.x != null && action.y != null -> "(${action.x}, ${action.y})"
             !action.textToType.isNullOrBlank() -> "\"${action.textToType}\""

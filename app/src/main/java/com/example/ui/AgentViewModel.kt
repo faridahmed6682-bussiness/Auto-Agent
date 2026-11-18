@@ -8,6 +8,7 @@ import com.example.agent.AgentCoordinator
 import com.example.agent.AgentExecutionMode
 import com.example.agent.AgentSettings
 import com.example.agent.AgentUiState
+import com.example.agent.TaskPlaybook
 import com.example.service.TapPilotAccessibilityService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,6 +29,7 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
     val agentState: StateFlow<AgentUiState> = AgentCoordinator.uiState
     val isServiceConnected: StateFlow<Boolean> = AgentCoordinator.isServiceConnected
     val settings: StateFlow<AgentSettings> = AgentCoordinator.settings
+    val playbooks: StateFlow<List<TaskPlaybook>> = AgentCoordinator.playbooks
 
     private val _goalText = MutableStateFlow("")
     val goalText: StateFlow<String> = _goalText.asStateFlow()
@@ -43,6 +45,11 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     val quickPresets: List<GoalPreset> = listOf(
         GoalPreset(
+            title = "Carrom Self-Train",
+            prompt = "Open Carrom game, research board rules and foul conditions first, position the striker with DRAG, aim opposite the pocket to pot my coins cleanly, evaluate each shot outcome, and save winning angles & foul mistakes in my playbook.",
+            suggestedMode = AgentExecutionMode.CONTINUOUS_MONITOR
+        ),
+        GoalPreset(
             title = "FB & Messenger Watch",
             prompt = "Open Facebook, search for Gillette Guard around 180 taka, post in a buy/sell group if needed, monitor comments and Messenger replies, negotiate to 180 taka, and pause only if payment/checkout confirmation appears.",
             suggestedMode = AgentExecutionMode.CONTINUOUS_MONITOR
@@ -55,11 +62,6 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
         GoalPreset(
             title = "Toggle Wi-Fi",
             prompt = "Open Settings, navigate to Network & internet or Connections, and open Wi-Fi settings.",
-            suggestedMode = AgentExecutionMode.SINGLE_SESSION
-        ),
-        GoalPreset(
-            title = "Check Battery",
-            prompt = "Open Settings and check current Battery percentage and usage details.",
             suggestedMode = AgentExecutionMode.SINGLE_SESSION
         )
     )
@@ -111,6 +113,10 @@ class AgentViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearTrace() {
         AgentCoordinator.dismissFinishedState()
+    }
+
+    fun deletePlaybook(topicKey: String) {
+        AgentCoordinator.deletePlaybook(topicKey)
     }
 
     fun updateSettings(transform: (AgentSettings) -> AgentSettings) {
