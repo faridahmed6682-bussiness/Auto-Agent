@@ -132,6 +132,14 @@ class GeminiAiPlanner {
 
             val rawJson = withTimeout(INFERENCE_TIMEOUT_MS) {
                 if (settings.aiProvider == AiProvider.FIREBASE_AI) {
+                    val isFirebaseReady = runCatching {
+                        com.google.firebase.FirebaseApp.getInstance()
+                    }.isSuccess
+                    if (!isFirebaseReady) {
+                        throw IllegalStateException(
+                            "Firebase is not configured in this APK. Select Google AI Studio, Grok, or OpenRouter in Settings, or add GOOGLE_SERVICES_JSON secret in GitHub."
+                        )
+                    }
                     val response = firebaseModel.generateContent(
                         content {
                             snapshot.screenshot?.let { bitmap ->
