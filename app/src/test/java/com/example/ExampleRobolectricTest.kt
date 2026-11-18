@@ -23,26 +23,26 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `gemini planner parses structured JSON action accurately`() {
+    fun `gemini planner parses structured JSON action with waitSeconds and memoryNote`() {
         val planner = GeminiAiPlanner()
         val json = """
             {
-              "actionType": "INPUT_TEXT",
-              "targetNodeId": 7,
-              "x": 540,
-              "y": 310,
-              "textToType": "hello world",
-              "reason": "Type search query into box",
+              "actionType": "WAIT",
+              "targetNodeId": null,
+              "x": null,
+              "y": null,
+              "textToType": null,
+              "waitSeconds": 45,
+              "memoryNote": "Posted in group; awaiting Messenger reply.",
+              "reason": "Waiting for seller reply",
               "requiresConfirmation": false
             }
         """.trimIndent()
 
         val parsed = planner.parsePlannedAction(json)
-        assertEquals(AgentActionType.INPUT_TEXT, parsed.actionType)
-        assertEquals(7, parsed.targetNodeId)
-        assertEquals(540, parsed.x)
-        assertEquals(310, parsed.y)
-        assertEquals("hello world", parsed.textToType)
+        assertEquals(AgentActionType.WAIT, parsed.actionType)
+        assertEquals(45, parsed.waitSeconds)
+        assertEquals("Posted in group; awaiting Messenger reply.", parsed.memoryNote)
         assertFalse(parsed.requiresConfirmation)
     }
 }

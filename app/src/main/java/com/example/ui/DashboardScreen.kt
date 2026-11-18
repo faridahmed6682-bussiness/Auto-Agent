@@ -1,6 +1,12 @@
 package com.example.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.layout.Arrangement
@@ -37,11 +43,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
+import com.example.agent.AgentExecutionMode
 import com.example.agent.AgentStepLog
 import com.example.agent.AgentUiState
 import com.example.ui.theme.CyberTeal
@@ -58,9 +66,17 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     val isConnected by viewModel.isServiceConnected.collectAsStateWithLifecycle()
     val isEnabledInSettings by viewModel.isAccessibilityEnabledInSettings.collectAsStateWithLifecycle()
     val goalText by viewModel.goalText.collectAsStateWithLifecycle()
+    val executionMode by viewModel.executionMode.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
 
     var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        // Launch monitor regardless so foreground keep-alive starts cleanly even if notification is silent
+        viewModel.launchAgent()
+    }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -73,13 +89,29 @@ fun DashboardScreen(viewModel: AgentViewModel) {
     }
 
     val serviceActive = isConnected || isEnabledInSettings
-    val trace: List<AgentStepLog> = when (val s = agentState) {
-        is AgentUiState.Idle -> emptyList()
-        is AgentUiState.Running -> s.trace
-        is AgentUiState.Paused -> s.trace
-        is AgentUiState.AwaitingConfirmation -> s.trace
-        is AgentUiState.Completed -> s.trace
-        is AgentUiState.Error -> s.trace
+    val (trace, workingMemory) = when (val s = agentState) {
+        is AgentUiState.Idle -> emptyList<AgentStepLog>() to ""
+        is AgentUiState.Running -> s.trace to s.workingMemory
+        is AgentUiState.Paused -> s.trace to s.workingMemory
+        is AgentUiState.AwaitingConfirmation -> s.trace to s.workingMemory
+        is AgentUiState.Completed -> s.trace to s.workingMemory
+        is AgentUiState.Error -> s.trace to s.workingMemory
+    }
+
+    fun handleLaunchClick() {
+        if (executionMode == AgentExecutionMode.CONTINUOUS_MONITOR &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+        ) {
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                return
+            }
+        }
+        viewModel.launchAgent()
     }
 
     Scaffold(
@@ -146,12 +178,16 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                 item {
                     CommandDeckCard(
                         goalText = goalText,
+                        executionMode = executionMode,
+                        settings = settings,
                         presets = viewModel.quickPresets,
                         agentState = agentState,
                         isServiceActive = serviceActive,
                         onGoalChanged = viewModel::onGoalTextChanged,
+                        onModeChanged = viewModel::onExecutionModeChanged,
                         onSelectPreset = viewModel::selectPreset,
-                        onLaunch = viewModel::launchAgent,
+                        onOpenSettings = { showSettingsSheet = true },
+                        onLaunch = ::handleLaunchClick,
                         onPause = viewModel::pauseAgent,
                         onResume = viewModel::resumeAgent,
                         onStop = viewModel::stopAgent
@@ -171,6 +207,12 @@ fun DashboardScreen(viewModel: AgentViewModel) {
 
                 item {
                     AgentOutcomeBanner(state = agentState)
+                }
+
+                if (workingMemory.isNotBlank()) {
+                    item {
+                        WorkingMemoryCard(memory = workingMemory)
+                    }
                 }
 
                 item {
@@ -210,7 +252,7 @@ fun DashboardScreen(viewModel: AgentViewModel) {
                     ) { log ->
                         AnimatedVisibility(
                             visible = true,
-                            enter = fadeIn(tweenDuration()) + slideInVertically { it / 4 }
+                            enter = fadeIn(tween(220)) + slideInVertically { it / 4 }
                         ) {
                             StepLogCard(log = log)
                         }
@@ -232,5 +274,3 @@ fun DashboardScreen(viewModel: AgentViewModel) {
         )
     }
 }
-
-private fun tweenDuration() = androidx.compose.animation.core.tween<Float>(durationMillis = 220)

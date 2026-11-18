@@ -9,6 +9,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,15 +23,20 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Launch
 import androidx.compose.material.icons.rounded.AccessibilityNew
+import androidx.compose.material.icons.rounded.AllInclusive
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
@@ -38,6 +44,8 @@ import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.TouchApp
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -47,6 +55,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -63,6 +73,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -70,12 +84,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.agent.AgentExecutionMode
 import com.example.agent.AgentSettings
 import com.example.agent.AgentStepLog
 import com.example.agent.AgentUiState
+import com.example.agent.AiProvider
+import com.example.agent.SafetyPolicyMode
 import com.example.agent.StepStatus
 import com.example.ui.theme.AmberContainer
 import com.example.ui.theme.AmberWarning
@@ -254,11 +273,15 @@ fun AccessibilityOnboardingCard(
 @Composable
 fun CommandDeckCard(
     goalText: String,
+    executionMode: AgentExecutionMode,
+    settings: AgentSettings,
     presets: List<GoalPreset>,
     agentState: AgentUiState,
     isServiceActive: Boolean,
     onGoalChanged: (String) -> Unit,
+    onModeChanged: (AgentExecutionMode) -> Unit,
     onSelectPreset: (GoalPreset) -> Unit,
+    onOpenSettings: () -> Unit,
     onLaunch: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
@@ -268,6 +291,7 @@ fun CommandDeckCard(
     val isPaused = agentState is AgentUiState.Paused
     val isConfirming = agentState is AgentUiState.AwaitingConfirmation
     val isBusy = isRunning || isPaused || isConfirming
+    val keyMissing = settings.aiProvider.requiresApiKey && settings.activeApiKey().isBlank()
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -295,13 +319,108 @@ fun CommandDeckCard(
                     )
                 }
 
-                if (isRunning) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (keyMissing) AmberContainer else SlateSurfaceElevated)
+                        .border(
+                            1.dp,
+                            if (keyMissing) AmberWarning else SlateBorder,
+                            RoundedCornerShape(10.dp)
+                        )
+                        .clickable { onOpenSettings() }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
                     Text(
-                        text = "STEP ${agentState.currentStep}/${agentState.maxSteps}",
+                        text = if (isRunning) {
+                            if (agentState.mode == AgentExecutionMode.CONTINUOUS_MONITOR) {
+                                "CYCLE #${agentState.currentStep}"
+                            } else {
+                                "STEP ${agentState.currentStep}/${agentState.maxSteps ?: 0}"
+                            }
+                        } else if (keyMissing) {
+                            "${settings.aiProvider.shortBadge} • Key Needed"
+                        } else {
+                            settings.aiProvider.shortBadge
+                        },
                         style = MaterialTheme.typography.labelSmall,
-                        color = CyberTeal
+                        color = if (keyMissing) AmberWarning else CyberTeal
                     )
                 }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = executionMode == AgentExecutionMode.SINGLE_SESSION,
+                    onClick = { if (!isBusy) onModeChanged(AgentExecutionMode.SINGLE_SESSION) },
+                    enabled = !isBusy,
+                    modifier = Modifier
+                        .weight(1f)
+                        .minimumInteractiveComponentSize()
+                        .testTag("mode_single_chip"),
+                    label = {
+                        Text(
+                            text = stringResource(R.string.mode_single_session),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.TouchApp,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = CyberTealDark,
+                        selectedLabelColor = CyberTeal,
+                        selectedLeadingIconColor = CyberTeal
+                    )
+                )
+
+                FilterChip(
+                    selected = executionMode == AgentExecutionMode.CONTINUOUS_MONITOR,
+                    onClick = { if (!isBusy) onModeChanged(AgentExecutionMode.CONTINUOUS_MONITOR) },
+                    enabled = !isBusy,
+                    modifier = Modifier
+                        .weight(1f)
+                        .minimumInteractiveComponentSize()
+                        .testTag("mode_monitor_chip"),
+                    label = {
+                        Text(
+                            text = stringResource(R.string.mode_continuous_monitor),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.AllInclusive,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = CyberTealDark,
+                        selectedLabelColor = CyberTeal,
+                        selectedLeadingIconColor = CyberTeal
+                    )
+                )
+            }
+
+            if (executionMode == AgentExecutionMode.CONTINUOUS_MONITOR) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = stringResource(R.string.mode_monitor_hint),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = ElectricCyan
+                )
             }
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -316,7 +435,7 @@ fun CommandDeckCard(
                 label = { Text(stringResource(R.string.command_input_label)) },
                 placeholder = { Text(stringResource(R.string.command_input_placeholder)) },
                 minLines = 2,
-                maxLines = 4,
+                maxLines = 5,
                 trailingIcon = {
                     if (goalText.isNotEmpty() && !isBusy) {
                         IconButton(
@@ -387,13 +506,21 @@ fun CommandDeckCard(
                     )
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.TouchApp,
+                        imageVector = if (executionMode == AgentExecutionMode.CONTINUOUS_MONITOR) {
+                            Icons.Rounded.AllInclusive
+                        } else {
+                            Icons.Rounded.TouchApp
+                        },
                         contentDescription = null,
                         modifier = Modifier.size(20.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = stringResource(R.string.action_launch_agent),
+                        text = if (executionMode == AgentExecutionMode.CONTINUOUS_MONITOR) {
+                            stringResource(R.string.action_start_monitor)
+                        } else {
+                            stringResource(R.string.action_launch_agent)
+                        },
                         style = MaterialTheme.typography.labelLarge
                     )
                 }
@@ -447,6 +574,43 @@ fun CommandDeckCard(
                         Text(text = stringResource(R.string.action_stop_agent))
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun WorkingMemoryCard(memory: String) {
+    if (memory.isBlank()) return
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = SlateSurfaceElevated),
+        border = BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.45f)),
+        shape = MaterialTheme.shapes.small
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.Top
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Memory,
+                contentDescription = null,
+                tint = ElectricCyan,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+            Column {
+                Text(
+                    text = "AI WORKING MEMORY",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ElectricCyan
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = memory,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
             }
         }
     }
@@ -622,6 +786,7 @@ fun AgentOutcomeBanner(state: AgentUiState) {
 fun StepLogCard(log: AgentStepLog) {
     val badgeColor = when (log.status) {
         StepStatus.EXECUTED, StepStatus.APPROVED, StepStatus.COMPLETED -> CyberTeal
+        StepStatus.WAITING -> ElectricCyan
         StepStatus.AWAITING_APPROVAL -> AmberWarning
         StepStatus.REJECTED -> AmberWarning
         StepStatus.FAILED -> CrimsonStop
@@ -714,13 +879,19 @@ fun EmptyTraceCard() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AgentSettingsSheet(
     settings: AgentSettings,
     onUpdate: ((AgentSettings) -> AgentSettings) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var showApiKey by rememberSaveable { mutableStateOf(false) }
+
+    val provider = settings.aiProvider
+    var localApiKey by remember(provider) { mutableStateOf(settings.activeApiKey()) }
+    var localModel by remember(provider) { mutableStateOf(settings.activeModelName()) }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = SlateSurface
@@ -728,6 +899,7 @@ fun AgentSettingsSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
                 .padding(horizontal = 20.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
@@ -736,6 +908,125 @@ fun AgentSettingsSheet(
                 text = stringResource(R.string.settings_title),
                 style = MaterialTheme.typography.headlineSmall
             )
+            HorizontalDivider(color = SlateBorder)
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Rounded.Key,
+                    contentDescription = null,
+                    tint = CyberTeal,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = stringResource(R.string.settings_provider_section),
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                AiProvider.entries.forEach { item ->
+                    FilterChip(
+                        selected = provider == item,
+                        onClick = { onUpdate { it.copy(aiProvider = item) } },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("provider_${item.name.lowercase()}"),
+                        label = { Text(item.displayName) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = CyberTealDark,
+                            selectedLabelColor = CyberTeal
+                        )
+                    )
+                }
+            }
+
+            if (!provider.requiresApiKey) {
+                Text(
+                    text = stringResource(R.string.settings_firebase_note),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = ElectricCyan
+                )
+            } else {
+                OutlinedTextField(
+                    value = localApiKey,
+                    onValueChange = { newVal ->
+                        localApiKey = newVal
+                        onUpdate { current ->
+                            when (provider) {
+                                AiProvider.GOOGLE_AI_STUDIO -> current.copy(googleAiStudioApiKey = newVal)
+                                AiProvider.XAI_GROK -> current.copy(grokApiKey = newVal)
+                                AiProvider.OPENROUTER -> current.copy(openRouterApiKey = newVal)
+                                AiProvider.FIREBASE_AI -> current
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    visualTransformation = if (showApiKey) {
+                        VisualTransformation.None
+                    } else {
+                        PasswordVisualTransformation()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("api_key_input"),
+                    label = { Text("${provider.displayName} ${stringResource(R.string.settings_api_key_label)}") },
+                    trailingIcon = {
+                        IconButton(
+                            onClick = { showApiKey = !showApiKey },
+                            modifier = Modifier.minimumInteractiveComponentSize()
+                        ) {
+                            Icon(
+                                imageVector = if (showApiKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                                contentDescription = stringResource(R.string.cd_toggle_key_visibility)
+                            )
+                        }
+                    },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyberTeal,
+                        unfocusedBorderColor = SlateBorder,
+                        focusedLabelColor = CyberTeal
+                    )
+                )
+
+                OutlinedTextField(
+                    value = localModel,
+                    onValueChange = { newModel ->
+                        localModel = newModel
+                        onUpdate { current ->
+                            when (provider) {
+                                AiProvider.GOOGLE_AI_STUDIO -> current.copy(googleAiStudioModel = newModel)
+                                AiProvider.XAI_GROK -> current.copy(grokModel = newModel)
+                                AiProvider.OPENROUTER -> current.copy(openRouterModel = newModel)
+                                AiProvider.FIREBASE_AI -> current
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("model_id_input"),
+                    label = { Text(stringResource(R.string.settings_model_id_label)) },
+                    placeholder = { Text(provider.defaultModel) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CyberTeal,
+                        unfocusedBorderColor = SlateBorder,
+                        focusedLabelColor = CyberTeal
+                    )
+                )
+
+                if (localApiKey.isBlank()) {
+                    Text(
+                        text = stringResource(R.string.settings_api_key_missing),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = AmberWarning
+                    )
+                }
+            }
+
             HorizontalDivider(color = SlateBorder)
 
             SettingSwitchRow(
@@ -748,11 +1039,19 @@ fun AgentSettingsSheet(
             )
 
             SettingSwitchRow(
-                title = stringResource(R.string.settings_confirm_label),
-                subtitle = stringResource(R.string.settings_confirm_desc),
-                checked = settings.confirmSensitiveActions,
-                onCheckedChange = { enabled ->
-                    onUpdate { it.copy(confirmSensitiveActions = enabled) }
+                title = stringResource(R.string.settings_safety_mode_label),
+                subtitle = stringResource(R.string.settings_safety_mode_desc),
+                checked = settings.safetyPolicyMode == SafetyPolicyMode.PAYMENT_ONLY,
+                onCheckedChange = { paymentOnly ->
+                    onUpdate {
+                        it.copy(
+                            safetyPolicyMode = if (paymentOnly) {
+                                SafetyPolicyMode.PAYMENT_ONLY
+                            } else {
+                                SafetyPolicyMode.STRICT_ALL
+                            }
+                        )
+                    }
                 }
             )
 
@@ -764,6 +1063,44 @@ fun AgentSettingsSheet(
                     onUpdate { it.copy(goHomeOnLaunch = enabled) }
                 }
             )
+
+            SettingSwitchRow(
+                title = stringResource(R.string.settings_keep_screen_label),
+                subtitle = stringResource(R.string.settings_keep_screen_desc),
+                checked = settings.keepScreenAwake,
+                onCheckedChange = { enabled ->
+                    onUpdate { it.copy(keepScreenAwake = enabled) }
+                }
+            )
+
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = stringResource(R.string.settings_monitor_interval_label),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = "${settings.monitorIntervalSec} sec",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CyberTeal
+                    )
+                }
+                Slider(
+                    value = settings.monitorIntervalSec.toFloat(),
+                    onValueChange = { value ->
+                        onUpdate { it.copy(monitorIntervalSec = (value / 10f).roundToInt() * 10) }
+                    },
+                    valueRange = 10f..180f,
+                    steps = 16,
+                    colors = SliderDefaults.colors(
+                        thumbColor = CyberTeal,
+                        activeTrackColor = CyberTeal
+                    )
+                )
+            }
 
             Column {
                 Row(
@@ -785,8 +1122,8 @@ fun AgentSettingsSheet(
                     onValueChange = { value ->
                         onUpdate { it.copy(maxSteps = value.roundToInt()) }
                     },
-                    valueRange = 5f..30f,
-                    steps = 4,
+                    valueRange = 5f..50f,
+                    steps = 8,
                     colors = SliderDefaults.colors(
                         thumbColor = CyberTeal,
                         activeTrackColor = CyberTeal

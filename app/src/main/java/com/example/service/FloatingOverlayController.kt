@@ -17,6 +17,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.agent.AgentCoordinator
+import com.example.agent.AgentExecutionMode
 import com.example.agent.AgentUiState
 import kotlin.math.abs
 
@@ -44,7 +45,12 @@ class FloatingOverlayController(private val context: Context) {
                 is AgentUiState.Running -> {
                     ensureAttached()
                     updateDotColor("#2EE6A6")
-                    titleView?.text = "TapPilot • Step ${state.currentStep}/${state.maxSteps}"
+                    val stepHeader = if (state.mode == AgentExecutionMode.CONTINUOUS_MONITOR) {
+                        "Monitor • Cycle #${state.currentStep}"
+                    } else {
+                        "TapPilot • Step ${state.currentStep}/${state.maxSteps ?: 0}"
+                    }
+                    titleView?.text = stepHeader
                     detailView?.text = state.lastThought.ifBlank { state.phase.label }
                     pauseButton?.visibility = View.VISIBLE
                     pauseButton?.text = "Pause"
@@ -55,8 +61,9 @@ class FloatingOverlayController(private val context: Context) {
                 is AgentUiState.Paused -> {
                     ensureAttached()
                     updateDotColor("#FFB020")
-                    titleView?.text = "Paused • Step ${state.currentStep}/${state.maxSteps}"
-                    detailView?.text = "Automation paused. Tap Resume or Stop."
+                    val modeTag = if (state.mode == AgentExecutionMode.CONTINUOUS_MONITOR) "Monitor" else "TapPilot"
+                    titleView?.text = "$modeTag Paused • #${state.currentStep}"
+                    detailView?.text = state.pauseReason.ifBlank { "Paused. Tap Resume or Stop." }
                     pauseButton?.visibility = View.VISIBLE
                     pauseButton?.text = "Resume"
                     stopButton?.visibility = View.VISIBLE
@@ -66,7 +73,7 @@ class FloatingOverlayController(private val context: Context) {
                 is AgentUiState.AwaitingConfirmation -> {
                     ensureAttached()
                     updateDotColor("#FFB020")
-                    titleView?.text = "Confirm Sensitive Action"
+                    titleView?.text = "Payment / Security Gate"
                     detailView?.text = state.targetDescription
                     pauseButton?.visibility = View.GONE
                     stopButton?.visibility = View.GONE
@@ -186,7 +193,6 @@ class FloatingOverlayController(private val context: Context) {
         pauseButton = pauseBtn
 
         val stopBtn = makePillButton("Stop", "#3D1018", "#FF5468").apply {
-            (layoutParams as? LinearLayout.LayoutParams)?.marginStart = dp(8)
             setOnClickListener { AgentCoordinator.stopTask() }
         }
         stopButton = stopBtn
@@ -238,7 +244,7 @@ class FloatingOverlayController(private val context: Context) {
         container.addView(confirmContainer)
 
         val params = WindowManager.LayoutParams(
-            dp(260),
+            dp(264),
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,

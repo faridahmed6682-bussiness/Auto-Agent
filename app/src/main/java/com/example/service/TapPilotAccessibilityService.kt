@@ -1,6 +1,8 @@
 package com.example.service
 
 import android.accessibilityservice.AccessibilityService
+import android.app.KeyguardManager
+import android.app.Notification
 import android.content.ComponentName
 import android.content.Context
 import android.os.Build
@@ -10,6 +12,7 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
 import com.example.agent.AgentCoordinator
+import com.example.agent.NotificationSignal
 import com.example.agent.PlannedAction
 import com.example.agent.UiSnapshot
 import kotlinx.coroutines.CoroutineScope
@@ -40,11 +43,26 @@ class TapPilotAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Perception is captured on-demand during each Observe -> Think -> Act cycle.
+        if (event == null) return
+        if (event.eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
+            val sourcePkg = event.packageName?.toString().orEmpty()
+            if (sourcePkg.isBlank() || sourcePkg == packageName) return
+
+            val notifText = extractNotificationText(event)
+            if (notifText.isNotBlank()) {
+                AgentCoordinator.onNotificationReceived(
+                    NotificationSignal(
+                        packageName = sourcePkg,
+                        text = notifText.take(240),
+                        timestampMs = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
     }
 
     override fun onInterrupt() {
-        AgentCoordinator.pauseTask()
+        AgentCoordinator.pauseTask("Interrupted by system accessibility service.")
     }
 
     override fun onDestroy() {
@@ -56,10 +74,15 @@ class TapPilotAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
+    fun isDeviceLocked(): Boolean {
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager ?: return false
+        return km.isKeyguardLocked
+    }
+
     suspend fun captureSnapshot(useScreenshot: Boolean): UiSnapshot {
         val (width, height) = getScreenDimensions()
 
-        // Temporarily hide our floating overlay so screenshots capture unobstructed target UI.
+        // Temporarily hide floating overlay so screenshots capture unobstructed target UI.
         overlayController?.setTemporarilyHidden(true)
         delay(80)
         val captureResult = try {
@@ -105,6 +128,17 @@ class TapPilotAccessibilityService : AccessibilityService() {
 
     fun navigateHome(): Boolean {
         return performGlobalAction(GLOBAL_ACTION_HOME)
+    }
+
+    private fun extractNotificationText(event: AccessibilityEvent): String {
+        val parcel = event.parcelableData
+        if (parcel is Notification) {
+            val title = parcel.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+            val body = parcel.extras?.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+            val combined = listOf(title, body).filter { it.isNotBlank() }.joinToString(": ")
+            if (combined.isNotBlank()) return combined
+        }
+        return event.text?.joinToString(" ") { it?.toString().orEmpty() }?.trim().orEmpty()
     }
 
     private fun getScreenDimensions(): Pair<Int, Int> {

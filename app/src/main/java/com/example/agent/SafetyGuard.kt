@@ -2,13 +2,23 @@ package com.example.agent
 
 object SafetyGuard {
 
-    private val sensitiveKeywords = listOf(
-        "pay", "checkout", "purchase", "buy now", "place order", "confirm order",
-        "transfer", "send money", "upi", "wallet", "card", "cvv",
-        "delete", "remove", "erase", "uninstall", "factory reset", "format",
-        "send", "submit", "post", "publish", "call", "dial",
-        "password", "passcode", "pin", "otp", "permission", "allow",
-        "পেমেন্ট", "পরিশোধ", "ডিলিট", "মুছুন", "পাঠান", "কল"
+    // Always blocked for user approval: payments, money transfer, final checkout/orders, PIN/OTP
+    private val paymentAndFinancialKeywords = listOf(
+        "pay", "payment", "pay now", "checkout", "proceed to pay", "purchase",
+        "buy now", "place order", "confirm order", "order now", "complete order",
+        "transfer", "send money", "cash out", "add money", "recharge", "top up",
+        "bkash", "nagad", "rocket", "upay", "upi", "wallet",
+        "credit card", "debit card", "card number", "cvv", "billing",
+        "otp", "pin", "passcode", "password", "biometric",
+        "factory reset", "erase all", "format",
+        "পেমেন্ট", "পরিশোধ", "টাকা পাঠান", "অর্ডার কনফার্ম", "অর্ডার করুন", "কিনুন", "বিকাশ", "নগদ"
+    )
+
+    // Extra keywords gated only when user opts into STRICT_ALL mode
+    private val strictExtraKeywords = listOf(
+        "delete", "remove", "uninstall", "send", "submit", "post", "publish",
+        "call", "dial", "permission", "allow",
+        "ডিলিট", "মুছুন", "পাঠান", "কল"
     )
 
     data class Evaluation(
@@ -19,12 +29,8 @@ object SafetyGuard {
     fun evaluate(
         action: PlannedAction,
         targetNode: ScreenNode?,
-        confirmSensitiveEnabled: Boolean
+        policyMode: SafetyPolicyMode
     ): Evaluation {
-        if (!confirmSensitiveEnabled) {
-            return Evaluation(needsConfirmation = false, reason = "")
-        }
-
         if (action.actionType in listOf(
                 AgentActionType.COMPLETE,
                 AgentActionType.FAIL,
@@ -36,13 +42,6 @@ object SafetyGuard {
             )
         ) {
             return Evaluation(needsConfirmation = false, reason = "")
-        }
-
-        if (action.requiresConfirmation) {
-            return Evaluation(
-                needsConfirmation = true,
-                reason = "AI flagged this ${action.actionType.name} step as sensitive: ${action.reason}"
-            )
         }
 
         val combinedText = buildString {
@@ -59,21 +58,44 @@ object SafetyGuard {
             }
         }
 
-        val matchedKeyword = sensitiveKeywords.firstOrNull { keyword ->
-            combinedText.contains(keyword)
+        val matchedPayment = paymentAndFinancialKeywords.firstOrNull { keyword ->
+            containsTokenOrPhrase(combinedText, keyword)
+        }
+        if (matchedPayment != null) {
+            return Evaluation(
+                needsConfirmation = true,
+                reason = "Payment/Security Guard triggered ('$matchedPayment'). Approve before continuing."
+            )
         }
 
-        return if (matchedKeyword != null) {
-            Evaluation(
+        if (action.requiresConfirmation) {
+            return Evaluation(
                 needsConfirmation = true,
-                reason = "Detected sensitive action keyword '$matchedKeyword' on target UI control."
+                reason = "AI flagged payment/security sensitivity: ${action.reason}"
             )
-        } else {
-            Evaluation(needsConfirmation = false, reason = "")
         }
+
+        if (policyMode == SafetyPolicyMode.STRICT_ALL) {
+            val matchedStrict = strictExtraKeywords.firstOrNull { keyword ->
+                containsTokenOrPhrase(combinedText, keyword)
+            }
+            if (matchedStrict != null) {
+                return Evaluation(
+                    needsConfirmation = true,
+                    reason = "Strict Guard triggered ('$matchedStrict') on target control."
+                )
+            }
+        }
+
+        return Evaluation(needsConfirmation = false, reason = "")
     }
 
-    fun isStuckLoop(recentLogs: List<AgentStepLog>, candidate: PlannedAction, targetSummary: String): Boolean {
+    fun isStuckLoop(
+        recentLogs: List<AgentStepLog>,
+        candidate: PlannedAction,
+        targetSummary: String
+    ): Boolean {
+        if (candidate.actionType == AgentActionType.WAIT) return false
         if (recentLogs.size < 3) return false
         val lastThree = recentLogs.takeLast(3)
         return lastThree.all {
@@ -81,5 +103,13 @@ object SafetyGuard {
                 it.targetSummary == targetSummary &&
                 it.status == StepStatus.EXECUTED
         }
+    }
+
+    private fun containsTokenOrPhrase(haystack: String, needle: String): Boolean {
+        if (needle.contains(' ') || needle.any { it.code > 127 }) {
+            return haystack.contains(needle)
+        }
+        val regex = Regex("\\b${Regex.escape(needle)}\\b")
+        return regex.containsMatchIn(haystack)
     }
 }
