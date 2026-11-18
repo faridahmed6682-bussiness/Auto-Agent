@@ -37,11 +37,17 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Prepare Keystores & Optional Google Services Config
+      - name: Prepare Keystores, SDK Licenses & Optional Google Services
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+          if [ -x "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          fi
+
           if [ -f debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f debug.keystore ]; then
@@ -63,25 +69,37 @@ jobs:
           fi
 
       - name: Run Unit & Robolectric Tests
-        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle :app:testDebugUnitTest --no-daemon --console=plain 2>&1 | tee gradle-test.log
 
-      - name: Print Failed Test Details
+      - name: Print Failure Summary
         if: failure()
         run: |
-          if [ -d app/build/test-results ]; then
-            grep -rn -C 5 -E '<(failure|error)' app/build/test-results || true
+          echo "### Gradle Failure Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f gradle-test.log ]; then
+            grep -E '^> Task .* FAILED|^e: |^FAILURE:|^Caused by:|Execution failed for task' gradle-test.log | head -n 40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            echo "--- What went wrong ---" | tee -a "$GITHUB_STEP_SUMMARY"
+            awk '/^\* What went wrong:/{flag=1} /^\* Try:/{flag=0} flag' gradle-test.log | head -n 30 | tee -a "$GITHUB_STEP_SUMMARY" || true
           fi
+          if [ -d app/build/test-results ]; then
+            grep -rn -C 3 -E '<(failure|error)' app/build/test-results | head -n 40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload Test Failure Report
+      - name: Upload Test & Log Failure Report
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: unit-test-reports
-          path: app/build/reports/tests/
+          path: |
+            app/build/reports/tests/
+            gradle-test.log
           if-no-files-found: ignore
 
       - name: Build Debug APK
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: gradle :app:assembleDebug --no-daemon --console=plain
 
       - name: Build Signed Release APK (if keystore secrets configured)
         env:
