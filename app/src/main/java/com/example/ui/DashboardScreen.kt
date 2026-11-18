@@ -1,0 +1,236 @@
+package com.example.ui
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.R
+import com.example.agent.AgentStepLog
+import com.example.agent.AgentUiState
+import com.example.ui.theme.CyberTeal
+import com.example.ui.theme.ElectricCyan
+import com.example.ui.theme.ObsidianBg
+import com.example.ui.theme.SlateBorder
+
+@Composable
+fun DashboardScreen(viewModel: AgentViewModel) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    val agentState by viewModel.agentState.collectAsStateWithLifecycle()
+    val isConnected by viewModel.isServiceConnected.collectAsStateWithLifecycle()
+    val isEnabledInSettings by viewModel.isAccessibilityEnabledInSettings.collectAsStateWithLifecycle()
+    val goalText by viewModel.goalText.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
+
+    var showSettingsSheet by rememberSaveable { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshAccessibilityStatus()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    val serviceActive = isConnected || isEnabledInSettings
+    val trace: List<AgentStepLog> = when (val s = agentState) {
+        is AgentUiState.Idle -> emptyList()
+        is AgentUiState.Running -> s.trace
+        is AgentUiState.Paused -> s.trace
+        is AgentUiState.AwaitingConfirmation -> s.trace
+        is AgentUiState.Completed -> s.trace
+        is AgentUiState.Error -> s.trace
+    }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = ObsidianBg,
+        contentWindowInsets = WindowInsets.safeDrawing
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawBehind {
+                    drawRect(
+                        brush = Brush.radialGradient(
+                            colors = listOf(
+                                CyberTeal.copy(alpha = 0.08f),
+                                ElectricCyan.copy(alpha = 0.03f),
+                                ObsidianBg
+                            ),
+                            center = Offset(size.width * 0.85f, size.height * 0.1f),
+                            radius = size.maxDimension * 0.7f
+                        )
+                    )
+                    val stepPx = 44.dp.toPx()
+                    var x = 0f
+                    while (x < size.width) {
+                        drawLine(
+                            color = SlateBorder.copy(alpha = 0.16f),
+                            start = Offset(x, 0f),
+                            end = Offset(x, size.height),
+                            strokeWidth = 1f
+                        )
+                        x += stepPx
+                    }
+                }
+                .padding(innerPadding),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = 640.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                item {
+                    TelemetryHeader(
+                        isServiceActive = serviceActive,
+                        isRunning = agentState is AgentUiState.Running,
+                        onOpenSettings = { showSettingsSheet = true }
+                    )
+                }
+
+                if (!serviceActive) {
+                    item {
+                        AccessibilityOnboardingCard(
+                            onOpenAccessibilitySettings = {
+                                context.startActivity(viewModel.buildOpenAccessibilitySettingsIntent())
+                            },
+                            onRefreshStatus = { viewModel.refreshAccessibilityStatus() }
+                        )
+                    }
+                }
+
+                item {
+                    CommandDeckCard(
+                        goalText = goalText,
+                        presets = viewModel.quickPresets,
+                        agentState = agentState,
+                        isServiceActive = serviceActive,
+                        onGoalChanged = viewModel::onGoalTextChanged,
+                        onSelectPreset = viewModel::selectPreset,
+                        onLaunch = viewModel::launchAgent,
+                        onPause = viewModel::pauseAgent,
+                        onResume = viewModel::resumeAgent,
+                        onStop = viewModel::stopAgent
+                    )
+                }
+
+                val confirmingState = agentState as? AgentUiState.AwaitingConfirmation
+                if (confirmingState != null) {
+                    item {
+                        SensitiveConfirmCard(
+                            state = confirmingState,
+                            onApprove = { viewModel.confirmPendingAction(true) },
+                            onCancel = { viewModel.confirmPendingAction(false) }
+                        )
+                    }
+                }
+
+                item {
+                    AgentOutcomeBanner(state = agentState)
+                }
+
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = stringResource(R.string.trace_section_title),
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        if (agentState is AgentUiState.Completed || agentState is AgentUiState.Error) {
+                            TextButton(
+                                onClick = viewModel::clearTrace,
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("clear_trace_button")
+                            ) {
+                                Text(
+                                    text = stringResource(R.string.action_clear_trace),
+                                    color = CyberTeal
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (trace.isEmpty()) {
+                    item {
+                        EmptyTraceCard()
+                    }
+                } else {
+                    items(
+                        items = trace.asReversed(),
+                        key = { "${it.stepNumber}_${it.timestampMs}" }
+                    ) { log ->
+                        AnimatedVisibility(
+                            visible = true,
+                            enter = fadeIn(tweenDuration()) + slideInVertically { it / 4 }
+                        ) {
+                            StepLogCard(log = log)
+                        }
+                    }
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(16.dp))
+                }
+            }
+        }
+    }
+
+    if (showSettingsSheet) {
+        AgentSettingsSheet(
+            settings = settings,
+            onUpdate = viewModel::updateSettings,
+            onDismiss = { showSettingsSheet = false }
+        )
+    }
+}
+
+private fun tweenDuration() = androidx.compose.animation.core.tween<Float>(durationMillis = 220)
